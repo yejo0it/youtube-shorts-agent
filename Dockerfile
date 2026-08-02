@@ -24,8 +24,11 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4).status == 200 else 1)"
 
+# toolbarMode=minimal 은 .streamlit/config.toml 에도 있지만, 작업 디렉터리가 바뀌거나
+# 설정 파일이 볼륨으로 가려져도 'c' 키 캐시 삭제 모달이 되살아나지 않도록 여기서도 고정한다.
 CMD ["streamlit", "run", "streamlit_app.py", \
      "--server.port=8501", \
      "--server.address=0.0.0.0", \
      "--server.headless=true", \
-     "--browser.gatherUsageStats=false"]
+     "--browser.gatherUsageStats=false", \
+     "--client.toolbarMode=minimal"]

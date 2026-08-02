@@ -5,11 +5,10 @@ from __future__ import annotations
 import html
 import logging
 
-import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from . import store, theme
+from . import exports, store, theme
 from .config import settings
 from .schemas import CrawlResult
 from .tools import crawl_channel, read_results
@@ -25,7 +24,14 @@ st.set_page_config(
 
 CSS = f"""
 <style>
-  .block-container {{ padding-top: 2.2rem; max-width: 1280px; }}
+  /* 전체 너비 — 기본 max-width 제한을 풀고 좌우 여백만 남긴다. */
+  .block-container {{
+    padding-top: 2.2rem;
+    padding-left: 2rem;
+    padding-right: 2rem;
+    max-width: 100%;
+  }}
+  [data-testid="stMainBlockContainer"] {{ max-width: 100%; }}
 
   .card {{
     background: {theme.SURFACE};
@@ -33,20 +39,44 @@ CSS = f"""
     border-radius: 12px;
     padding: 16px 18px;
   }}
+
+  /* KPI 카드는 st.columns 대신 grid 한 장으로 그린다.
+     - auto-fit + minmax(0,1fr): 남는 폭을 카드가 똑같이 나눠 가짐 (너비 균일)
+     - align-items 기본값 stretch: 행 안의 카드가 가장 큰 카드 높이에 맞춰짐 (높이 균일)
+     - 보조 문구는 margin-top:auto 로 바닥에 붙어, 문구가 없는 카드와 기준선이 어긋나지 않음 */
+  .kpi-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+    margin: 6px 0 2px;
+  }}
+  .kpi-grid .card {{
+    display: flex;
+    flex-direction: column;
+    min-height: 116px;
+  }}
   .metric-label {{
     color: {theme.INK_MUTED}; font-size: 0.8rem; letter-spacing: .02em;
     margin-bottom: 6px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }}
   .metric-value {{
     color: {theme.INK_PRIMARY}; font-size: 1.75rem; font-weight: 650; line-height: 1.1;
+    font-variant-numeric: tabular-nums;
   }}
-  .metric-sub {{ color: {theme.INK_SECONDARY}; font-size: 0.78rem; margin-top: 6px; }}
+  .metric-sub {{
+    color: {theme.INK_SECONDARY}; font-size: 0.78rem;
+    margin-top: auto; padding-top: 8px; min-height: 1.1em;
+  }}
 
   .short-card {{
     background: {theme.SURFACE};
     border: 1px solid {theme.BORDER};
     border-radius: 12px;
     overflow: hidden;
+    /* 전체 너비에서 세로 썸네일이 화면을 삼키지 않도록 카드 폭만 묶는다. */
+    max-width: 280px;
+    margin-inline: auto;
   }}
   .short-thumb-wrap {{ position: relative; }}
   .short-thumb {{
@@ -92,12 +122,15 @@ CSS = f"""
     border-left: 2px solid {theme.GRIDLINE}; padding: 2px 0 2px 14px; margin-bottom: 14px;
   }}
   .thread-head {{ color: {theme.INK_MUTED}; font-size: .76rem; margin-bottom: 3px; }}
-  .thread-text {{ color: {theme.INK_PRIMARY}; font-size: .9rem; line-height: 1.5; }}
+  /* 본문은 전체 너비를 다 쓰지 않는다 — 한 줄이 길어지면 읽기 어려워진다. */
+  .thread-text {{ color: {theme.INK_PRIMARY}; font-size: .9rem; line-height: 1.5; max-width: 90ch; }}
   .reply {{
     margin: 8px 0 0 16px; padding-left: 12px;
     border-left: 2px solid {theme.GRIDLINE};
   }}
-  .reply-text {{ color: {theme.INK_SECONDARY}; font-size: .84rem; line-height: 1.45; }}
+  .reply-text {{
+    color: {theme.INK_SECONDARY}; font-size: .84rem; line-height: 1.45; max-width: 88ch;
+  }}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -125,10 +158,62 @@ def esc(text: str) -> str:
 
 
 def metric_card(label: str, value: str, sub: str = "") -> str:
-    sub_html = f'<div class="metric-sub">{esc(sub)}</div>' if sub else ""
+    # 보조 문구가 없어도 .metric-sub 자리는 남긴다 — 카드마다 값 위치가 흔들리지 않게.
     return (
         f'<div class="card"><div class="metric-label">{esc(label)}</div>'
-        f'<div class="metric-value">{esc(value)}</div>{sub_html}</div>'
+        f'<div class="metric-value">{esc(value)}</div>'
+        f'<div class="metric-sub">{esc(sub)}</div></div>'
+    )
+
+
+# ---------------------------------------------------------------- 내려받기 위젯
+
+# 직렬화 결과는 세션 상태에 들고 있는다.
+#   @st.cache_data / @st.cache_resource 로 만든 함수 캐시만 'c' 키 모달("Clear caches?")의
+#   삭제 대상이 된다. 세션 상태는 그 대상이 아니고, 내보내기 페이로드는 세션마다 다르므로
+#   애초에 전역 캐시일 이유도 없다. (모달 자체는 config.toml 의 toolbarMode 로 막는다.)
+
+_BUILDERS = {"csv": exports.shorts_csv, "json": exports.comments_json}
+
+
+def export_bytes(result: CrawlResult, kind: str) -> bytes:
+    """같은 수집 결과에 대해 rerun 마다 다시 직렬화하지 않도록 세션에 보관."""
+    key = f"{result.channel.channel_id}:{result.crawled_at}"
+    memo = st.session_state.setdefault("export_memo", {})
+    if memo.get("key") != key:  # 다른 채널/재수집 → 이전 페이로드는 버린다
+        memo.clear()
+        memo["key"] = key
+    if kind not in memo:
+        memo[kind] = _BUILDERS[kind](result)
+    return memo[kind]
+
+
+def csv_download(result: CrawlResult, key: str, label: str = "⬇ CSV 내려받기") -> None:
+    """쇼츠 성과 + 댓글·대댓글 반응 CSV. 헤더와 내려받기 섹션 양쪽에서 쓴다."""
+    if not result.shorts:
+        st.button(label, key=key, disabled=True, width="stretch")
+        return
+    st.download_button(
+        label,
+        export_bytes(result, "csv"),
+        file_name=exports.filename(result, "shorts", "csv"),
+        mime="text/csv",
+        key=key,
+        width="stretch",
+    )
+
+
+def json_download(result: CrawlResult, key: str) -> None:
+    if not result.comment_threads:
+        st.button("⬇ JSON 내려받기", key=key, disabled=True, width="stretch")
+        return
+    st.download_button(
+        "⬇ JSON 내려받기",
+        export_bytes(result, "json"),
+        file_name=exports.filename(result, "comments", "json"),
+        mime="application/json",
+        key=key,
+        width="stretch",
     )
 
 
@@ -287,14 +372,17 @@ def sentiment_bar(positive: int, neutral: int, negative: int) -> go.Figure:
 
 def render_header(result: CrawlResult) -> None:
     channel = result.channel
-    left, right = st.columns([1, 9], vertical_alignment="center")
-    with left:
+    avatar, title, action = st.columns([1, 7, 2], vertical_alignment="center")
+    with avatar:
         if channel.thumbnail_url:
             st.image(channel.thumbnail_url, width=76)
-    with right:
+    with title:
         st.markdown(f"## {esc(channel.title)}")
         meta = [channel.custom_url, f"개설 {channel.published_at[:10]}", channel.country]
         st.caption(" · ".join(m for m in meta if m))
+    with action:
+        csv_download(result, key="csv_header", label="📊 리포트 받기 (CSV)")
+        st.caption("쇼츠 성과 + 댓글·대댓글 반응")
 
 
 def render_metrics(result: CrawlResult) -> None:
@@ -310,8 +398,10 @@ def render_metrics(result: CrawlResult) -> None:
             f"스레드 {len(result.comment_threads):,}개",
         ),
     ]
-    for column, (label, value, sub) in zip(st.columns(len(cards)), cards):
-        column.markdown(metric_card(label, value, sub), unsafe_allow_html=True)
+    # st.columns 는 카드마다 별도 블록이라 높이가 내용에 따라 들쭉날쭉해진다.
+    # grid 한 장으로 그려 너비·높이를 한 번에 맞춘다.
+    grid = "".join(metric_card(label, value, sub) for label, value, sub in cards)
+    st.markdown(f'<div class="kpi-grid">{grid}</div>', unsafe_allow_html=True)
 
 
 def render_top_shorts(result: CrawlResult) -> None:
@@ -480,21 +570,7 @@ def render_charts(result: CrawlResult) -> None:
     st.plotly_chart(scatter_views_likes(result), width="stretch")
     st.caption("점 하나가 쇼츠 한 편입니다. 추세선 위쪽에 있을수록 조회수 대비 반응이 좋은 영상입니다.")
 
-    frame = pd.DataFrame(
-        [
-            {
-                "제목": v.title,
-                "길이(초)": v.duration_sec,
-                "조회수": v.view_count,
-                "좋아요": v.like_count,
-                "댓글": v.comment_count,
-                "좋아요율(%)": round(v.like_rate, 2),
-                "게시일": v.published_at[:10],
-                "링크": v.url,
-            }
-            for v in result.shorts
-        ]
-    )
+    frame = exports.shorts_frame(result)
     with st.expander(f"수집 쇼츠 전체 표 ({len(frame)}편)"):
         st.dataframe(
             frame,
@@ -502,12 +578,40 @@ def render_charts(result: CrawlResult) -> None:
             hide_index=True,
             column_config={"링크": st.column_config.LinkColumn("링크", display_text="열기")},
         )
-        st.download_button(
-            "CSV 내려받기",
-            frame.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"shorts_{result.channel.channel_id}.csv",
-            mime="text/csv",
+        st.caption(
+            "이 표는 성과 지표만 보여줍니다. 채널명 오른쪽 **CSV 내려받기** 버튼을 누르면 "
+            "각 쇼츠의 댓글·대댓글 반응까지 같은 행에 담긴 파일을 받습니다."
         )
+
+
+def render_downloads(result: CrawlResult) -> None:
+    st.markdown("### 📥 데이터 내려받기")
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown("**쇼츠 요약 + 댓글 반응 (CSV)**")
+        if result.shorts:
+            size = exports.human_size(len(export_bytes(result, "csv")))
+            st.caption(
+                f"쇼츠 {len(result.shorts):,}편 · {len(exports.METRIC_COLUMNS)}개 성과 열 + "
+                f"{len(exports.COMMENT_COLUMNS)}개 댓글 반응 열 · 엑셀 호환(UTF-8 BOM) · {size}"
+            )
+        else:
+            st.caption("내보낼 쇼츠가 없습니다.")
+        csv_download(result, key="csv_section")
+
+    with right:
+        st.markdown("**댓글·대댓글 원본 (JSON)**")
+        if result.comment_threads:
+            size = exports.human_size(len(export_bytes(result, "json")))
+            st.caption(
+                f"스레드 {len(result.comment_threads):,}개 · "
+                f"댓글 {result.total_comments_collected:,}건(대댓글 포함) · "
+                f"본문 컷 없는 수집 전량 · {size}"
+            )
+        else:
+            st.caption("수집된 댓글이 없습니다.")
+        json_download(result, key="json_section")
 
 
 def render_footer(result: CrawlResult) -> None:
@@ -546,5 +650,7 @@ def main() -> None:
     render_threads(result)
     st.divider()
     render_charts(result)
+    st.divider()
+    render_downloads(result)
     st.divider()
     render_footer(result)
