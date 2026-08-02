@@ -1,0 +1,17 @@
+# 검증된 라이트 팔레트에 맞춰 테마를 고정한다.
+# (차트 색상은 이 표면색 기준으로 대비/CVD 검증을 통과한 값들이다)
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#f9f9f7"
+secondaryBackgroundColor = "#fcfcfb"
+textColor = "#0b0b0b"
+font = "sans serif"
+
+[server]
+headless = true
+enableXsrfProtection = true
+maxUploadSize = 20
+
+[browser]
+gatherUsageStats = false

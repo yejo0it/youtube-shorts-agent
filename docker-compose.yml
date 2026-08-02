@@ -1,0 +1,21 @@
+services:
+  shorts-agent:
+    build: .
+    image: youtube-shorts-agent:latest
+    container_name: youtube-shorts-agent
+    ports:
+      - "8501:8501"          # 로컬 브라우저: http://localhost:8501
+    env_file:
+      - .env                 # YOUTUBE_API_KEY / ANTHROPIC_API_KEY
+    environment:
+      DATA_DIR: /data
+      TZ: Asia/Seoul
+    volumes:
+      - shorts-data:/data    # 크롤링 결과 영속화
+      # 개발 중 코드 즉시 반영이 필요하면 아래 두 줄의 주석을 해제하세요.
+      # - ./app:/srv/app
+      # - ./streamlit_app.py:/srv/streamlit_app.py
+    restart: unless-stopped
+
+volumes:
+  shorts-data:

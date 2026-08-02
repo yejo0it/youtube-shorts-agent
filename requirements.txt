@@ -1,0 +1,10 @@
+# Claude Opus 5 기능(structured outputs, beta tool runner)을 쓰므로 최신 SDK가 필요합니다.
+anthropic>=0.116.0
+
+# width="stretch" (구 use_container_width) 를 쓰므로 1.49 이상
+streamlit>=1.49
+plotly>=5.24
+pandas>=2.2
+google-api-python-client>=2.150
+pydantic>=2.9
+python-dotenv>=1.0
