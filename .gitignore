@@ -1,7 +1,30 @@
+# 환경변수 (실제 키 포함 파일 제외, .env.example만 커밋)
 .env
-.data/
+
+# Python 캐시 및 빌드 파일
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 가상환경
 .venv/
 venv/
-.streamlit/secrets.toml
+env/
+
+# 패키지 캐시
+.cache/
+.pytest_cache/
+
+# 크롤링 결과 데이터
+.data/
+
+# 로그
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
