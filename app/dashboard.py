@@ -15,12 +15,16 @@ from .tools import crawl_channel, read_results
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-st.set_page_config(
-    page_title="쇼츠 채널 분석 에이전트",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# 이 모듈에는 import 시점에 실행되는 Streamlit 호출이 있으면 안 된다.
+#
+# 엔트리포인트(streamlit_app.py)는 `from app.dashboard import main` 으로 이 모듈을
+# 가져온다. Streamlit 은 rerun/새 세션(F5)마다 엔트리포인트 스크립트를 다시 실행하지만,
+# 이미 sys.modules 에 올라온 모듈의 본문은 다시 실행하지 않는다. 즉 모듈 최상단에 둔
+# st.set_page_config()/st.markdown(CSS) 는 서버 프로세스당 단 한 번만 나가고,
+# 그 뒤의 모든 rerun 과 F5 에서는 누락된다 — layout="wide" 가 풀려 본문 폭이 좁아지고
+# KPI 카드가 스타일 없이 세로로 쏟아진다.
+#
+# 그래서 CSS 는 순수 문자열 상수로만 두고, 실제 주입은 main() 이 매 실행마다 한다.
 
 CSS = f"""
 <style>
@@ -133,7 +137,31 @@ CSS = f"""
   }}
 </style>
 """
-st.markdown(CSS, unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------- 페이지 부트스트랩
+
+
+def configure_page() -> None:
+    """페이지 설정 — 스크립트 실행마다 가장 먼저, 다른 st 호출보다 앞서 실행돼야 한다.
+
+    set_page_config 는 한 스크립트 실행에서 한 번만 허용되므로 main() 첫 줄에서만 부른다.
+    """
+    st.set_page_config(
+        page_title="쇼츠 채널 분석 에이전트",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+
+def inject_custom_css() -> None:
+    """커스텀 CSS 주입. 세션 상태와 무관하게 매 실행 무조건 나가야 한다.
+
+    조건문 안에 넣거나 모듈 최상단에 두면 rerun/F5 에서 <style> 이 빠지고,
+    카드 그리드가 무너져 지표가 한 줄씩 세로로 쏟아진다.
+    """
+    st.markdown(CSS, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------ 포맷 유틸
@@ -217,6 +245,78 @@ def json_download(result: CrawlResult, key: str) -> None:
     )
 
 
+# ------------------------------------------------------------------ 세션 상태
+
+# rerun(위젯 조작·내려받기 버튼 클릭 등)이 일어나도 화면이 그대로 남아 있어야 한다.
+# 그러려면 두 가지가 필요하다.
+#   1) 모든 위젯에 고정 key — key 없는 위젯의 식별자는 렌더 위치와 인자에 묶여,
+#      옵션 목록이나 렌더 조건이 바뀌면 선택값이 조용히 초기화될 수 있다.
+#   2) 수집 결과를 세션에 고정 — 매 rerun 마다 디스크에서 다시 읽으면
+#      화면에 떠 있던 채널이 '가장 최근 파일'로 슬쩍 바뀐다.
+
+
+def clamp(value: int, low: int, high: int) -> int:
+    """슬라이더 범위를 벗어난 .env 설정값이 세션에 들어가면 위젯 생성이 실패한다."""
+    return max(low, min(high, value))
+
+
+def init_state() -> None:
+    """위젯 기본값을 세션에 미리 심어 둔다 (위젯은 key 만 넘겨 값을 읽어간다)."""
+    defaults = {
+        "channel_input": "",
+        "max_videos": clamp(settings.default_max_videos, 10, 200),
+        "comment_targets": clamp(settings.comment_target_video_count, 1, 50),
+        "max_comments": clamp(settings.default_max_comments_per_video, 10, 100),
+        "run_analysis": bool(settings.anthropic_api_key),
+        "load_notice": "",
+        "top_metric": "view_count",
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+    # 보여줄 게 생기기 전까지만 디스크를 본다. 한 번 올라온 뒤에는 세션이
+    # 단일 진실 공급원 — rerun 이 화면 위의 채널을 최신 파일로 바꿔치지 않는다.
+    if st.session_state.get("result") is None:
+        st.session_state["result"] = read_results()
+
+
+def current_result() -> CrawlResult | None:
+    return st.session_state.get("result")
+
+
+def handle_of(result: CrawlResult) -> str:
+    """입력창에 다시 넣을 수 있는 채널 식별자. customUrl 은 보통 '@handle'."""
+    custom = (result.channel.custom_url or "").strip()
+    if not custom:
+        return result.channel.channel_id
+    return custom if custom.startswith("@") else f"@{custom}"
+
+
+def clear_load_notice() -> None:
+    """다른 채널을 고르면 직전 불러오기 안내는 더 이상 맞지 않는다."""
+    st.session_state["load_notice"] = ""
+
+
+def load_saved_channel() -> None:
+    """저장된 채널을 세션 결과로 올리고, 입력창도 같은 채널로 맞춘다.
+
+    on_click 콜백이라 위젯이 다시 만들어지기 전에 실행된다 — 이 시점에만
+    st.session_state['channel_input'] 을 덮어써도 예외가 나지 않는다.
+    """
+    channel_id = st.session_state.get("saved_pick")
+    if not channel_id:
+        return
+
+    result = read_results(channel_id)
+    if result is None:
+        st.session_state["load_notice"] = "⚠️ 저장된 결과를 읽지 못했습니다."
+        return
+
+    st.session_state["result"] = result
+    st.session_state["channel_input"] = handle_of(result)
+    st.session_state["load_notice"] = f"✅ **{result.channel.title}** 불러옴 · 입력창 반영됨"
+
+
 # -------------------------------------------------------------------- 사이드바
 
 
@@ -234,22 +334,21 @@ def sidebar() -> None:
 
         channel = st.text_input(
             "채널",
+            key="channel_input",
             placeholder="@handle 또는 UC... 또는 채널 URL",
             help="채널 ID, @핸들, 채널 URL 모두 인식합니다.",
         )
-        max_videos = st.slider("훑어볼 최근 업로드 수", 10, 200, settings.default_max_videos, 10)
-        comment_targets = st.slider(
-            "댓글 수집 대상 쇼츠 수", 1, 50, settings.comment_target_video_count
-        )
-        max_comments = st.slider(
-            "영상당 최상위 댓글 수", 10, 100, settings.default_max_comments_per_video, 10
-        )
-        run_analysis = st.checkbox("Claude 반응 분석 실행", value=an_ok, disabled=not an_ok)
+        max_videos = st.slider("훑어볼 최근 업로드 수", 10, 200, step=10, key="max_videos")
+        comment_targets = st.slider("댓글 수집 대상 쇼츠 수", 1, 50, key="comment_targets")
+        max_comments = st.slider("영상당 최상위 댓글 수", 10, 100, step=10, key="max_comments")
+        run_analysis = st.checkbox("Claude 반응 분석 실행", disabled=not an_ok, key="run_analysis")
 
         estimated = 2 + (max_videos // 50 + 1) * 2 + comment_targets * 2
         st.caption(f"예상 쿼터 소모: 약 {estimated} units (일일 한도 10,000)")
 
-        if st.button("🔍 수집 시작", type="primary", width="stretch", disabled=not yt_ok):
+        if st.button(
+            "🔍 수집 시작", type="primary", width="stretch", disabled=not yt_ok, key="run_crawl_btn"
+        ):
             if not channel.strip():
                 st.warning("채널을 입력하세요.")
             else:
@@ -260,16 +359,28 @@ def sidebar() -> None:
             st.divider()
             st.markdown("### 💾 저장된 채널")
             labels = {c["channel_id"]: f"{c['title']} · {c['crawled_at'][:10]}" for c in saved}
-            picked = st.selectbox(
+            st.selectbox(
                 "불러오기",
                 options=list(labels),
                 format_func=lambda cid: labels[cid],
                 index=None,
                 placeholder="채널 선택",
+                key="saved_pick",
+                on_change=clear_load_notice,
             )
-            if picked and st.button("불러오기", width="stretch"):
-                st.session_state["result"] = read_results(picked)
-                st.rerun()
+            # 조건부(`if picked and st.button(...)`)로 그리지 않는다. 위젯 트리에서
+            # 사라졌다 나타나는 버튼은 key 가 없으면 식별자가 렌더 위치에 묶여
+            # 불안정하다. 항상 그리고 선택 전에는 비활성화만 한다.
+            st.button(
+                "불러오기",
+                width="stretch",
+                key="load_saved_btn",
+                disabled=not st.session_state.get("saved_pick"),
+                on_click=load_saved_channel,
+                help="저장된 수집 결과를 바로 표시하고, 채널 입력창도 같은 채널로 채웁니다.",
+            )
+            if st.session_state["load_notice"]:
+                st.caption(st.session_state["load_notice"])
 
 
 def run_crawl(
@@ -296,6 +407,7 @@ def run_crawl(
 
     bar.empty()
     st.session_state["result"] = result
+    st.session_state["load_notice"] = ""
     st.rerun()
 
 
@@ -382,7 +494,6 @@ def render_header(result: CrawlResult) -> None:
         st.caption(" · ".join(m for m in meta if m))
     with action:
         csv_download(result, key="csv_header", label="📊 리포트 받기 (CSV)")
-        st.caption("쇼츠 성과 + 댓글·대댓글 반응")
 
 
 def render_metrics(result: CrawlResult) -> None:
@@ -412,6 +523,7 @@ def render_top_shorts(result: CrawlResult) -> None:
         format_func=lambda k: {"view_count": "조회수", "like_count": "좋아요", "comment_count": "댓글"}[k],
         horizontal=True,
         label_visibility="collapsed",
+        key="top_metric",
     )
 
     top = result.top_shorts(by=metric, limit=10)
@@ -524,12 +636,16 @@ def render_threads(result: CrawlResult) -> None:
         return
 
     titles = {v.video_id: v.title for v in result.shorts}
-    options = ["전체"] + [
-        f"{titles.get(vid, vid)[:45]}" for vid in dict.fromkeys(t.video_id for t in result.comment_threads)
-    ]
     ids = [None] + list(dict.fromkeys(t.video_id for t in result.comment_threads))
-    picked = st.selectbox("영상 필터", options=range(len(options)), format_func=lambda i: options[i])
-    video_id = ids[picked]
+    labels = {None: "전체", **{vid: titles.get(vid, vid)[:45] for vid in ids[1:]}}
+    # 채널마다 별도 key — 다른 채널을 불러왔을 때 이전 채널의 videoId 가 남아
+    # 옵션 목록에 없는 값을 가리키는 일을 막는다.
+    video_id = st.selectbox(
+        "영상 필터",
+        options=ids,
+        format_func=lambda vid: labels[vid],
+        key=f"thread_filter_{result.channel.channel_id}",
+    )
 
     threads = result.comment_threads if video_id is None else result.threads_for(video_id)
     top = sorted(threads, key=lambda t: t.like_count, reverse=True)[:15]
@@ -628,9 +744,15 @@ def render_footer(result: CrawlResult) -> None:
 
 
 def main() -> None:
+    # 순서 고정: 페이지 설정 → CSS → 그 외 모든 렌더.
+    # 이 두 줄은 어떤 조건문에도 들어가지 않는다 (F5/rerun 마다 100% 재실행).
+    configure_page()
+    inject_custom_css()
+
+    init_state()
     sidebar()
 
-    result: CrawlResult | None = st.session_state.get("result") or read_results()
+    result: CrawlResult | None = current_result()
     if result is None:
         st.title("📊 유튜브 쇼츠 채널 분석 에이전트")
         st.markdown(
