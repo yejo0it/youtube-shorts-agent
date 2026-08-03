@@ -1,10 +1,7 @@
 """대시보드 내려받기용 데이터 변환 — 쇼츠 요약+반응(CSV) / 댓글·대댓글 원본(JSON).
 
-CSV 는 '쇼츠 한 편 = 한 행'을 유지한 채 그 영상의 댓글·대댓글을 텍스트로 접어 넣어
-스프레드시트 한 장에서 성과와 반응을 같이 본다. 셀 상한을 넘는 분량은 JSON 쪽이 담당한다.
-
-LLM 에 넘기는 축약본(`tools.summarize_for_model`)과 달리, 여기서는 **수집한 전량**을
-그대로 내보낸다. 댓글 본문 컷·스레드 상한은 프롬프트 보호용이지 저장 데이터의 한계가 아니다.
+CSV 는 '쇼츠 한 편 = 한 행'에 댓글을 접어 넣고, 셀 상한을 넘는 분량은 JSON 이 담당한다.
+프롬프트용 축약본(tools.summarize_for_model)과 달리 수집 전량을 그대로 내보낸다.
 """
 
 from __future__ import annotations
@@ -57,7 +54,7 @@ MAX_CELL_CHARS = 32_000
 
 
 def _flat(text: str) -> str:
-    """댓글 본문의 줄바꿈을 접어 한 줄로 — 셀 안 스레드 구조를 읽을 수 있게."""
+    """줄바꿈을 접어 한 줄로 — 셀 안에서 스레드 구조가 읽히게."""
     return " ".join((text or "").split())
 
 
@@ -88,11 +85,7 @@ def _threads_cell(threads: list[CommentThread]) -> str:
 
 
 def shorts_frame(result: CrawlResult, with_comments: bool = False) -> pd.DataFrame:
-    """수집 쇼츠 한 편 = 한 행.
-
-    `with_comments=True` 면 그 쇼츠에 달린 댓글·대댓글과 LLM 반응 요약을 같은 행에 덧붙인다
-    (CSV 전용). 화면 표는 성과 지표만 쓴다.
-    """
+    """수집 쇼츠 한 편 = 한 행. with_comments 면 댓글·LLM 요약 열을 덧붙인다(CSV 전용)."""
     threads_by_video: dict[str, list[CommentThread]] = {}
     for thread in result.comment_threads:
         threads_by_video.setdefault(thread.video_id, []).append(thread)
@@ -177,8 +170,7 @@ def _thread_payload(thread: CommentThread) -> dict:
 def comments_payload(result: CrawlResult) -> dict:
     """영상 단위로 묶은 댓글·대댓글 원본 전체.
 
-    `total_reply_count` 는 YouTube 가 알려준 전체 대댓글 수, `collected_reply_count` 는
-    실제로 수집해 이 파일에 담긴 수다. 둘이 다르면 API 응답에서 잘린 것이다.
+    total_reply_count(YouTube 보고값)와 collected_reply_count(실제 수집분)가 다르면 잘린 것이다.
     """
     videos = {v.video_id: v for v in result.shorts}
 

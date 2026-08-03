@@ -1,7 +1,6 @@
-"""차트/UI 색상 토큰.
+"""차트/UI 색상 토큰의 단일 진실 공급원.
 
-검증된 기본 팔레트(light)를 사용한다. 브랜드 색으로 바꾸려면 이 파일의 값만
-교체하고 팔레트 검증기를 다시 돌리면 된다.
+CSS 는 이 값들을 `:root` 변수로 받아 쓴다(app/templates.py). 팔레트 교체는 여기서만.
 """
 
 from __future__ import annotations
@@ -56,7 +55,7 @@ def base_layout(height: int = 360) -> dict:
 
 
 def axis(title: str = "", show_grid: bool = True) -> dict:
-    """헤어라인 그리드 + 뒤로 물러나는 축."""
+    """헤어라인 그리드 + 뒤로 물러나는 축 스타일."""
     return {
         "title": {"text": title, "font": {"color": INK_MUTED, "size": 12}},
         "showgrid": show_grid,

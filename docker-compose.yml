@@ -12,9 +12,11 @@ services:
       TZ: Asia/Seoul
     volumes:
       - shorts-data:/data    # 크롤링 결과 영속화
-      # 개발 중 코드 즉시 반영이 필요하면 아래 두 줄의 주석을 해제하세요.
-      # - ./app:/srv/app
-      # - ./streamlit_app.py:/srv/streamlit_app.py
+      # 개발용 소스 마운트 — 코드·HTML·CSS 수정이 새로고침만으로 반영됩니다.
+      # 이미지에 담긴 코드로만 돌리려면 아래 세 줄을 주석 처리하세요.
+      - ./app:/srv/app
+      - ./web:/srv/web
+      - ./streamlit_app.py:/srv/streamlit_app.py
     restart: unless-stopped
 
 volumes:
