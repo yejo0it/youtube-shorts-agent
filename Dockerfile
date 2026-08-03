@@ -12,6 +12,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+# 대시보드 마크업/스타일 — app/templates.py 가 런타임에 읽으므로 빠지면 기동 즉시 실패한다.
+COPY web ./web
 COPY .streamlit ./.streamlit
 COPY streamlit_app.py .
 
@@ -24,8 +26,7 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4).status == 200 else 1)"
 
-# toolbarMode=minimal 은 .streamlit/config.toml 에도 있지만, 작업 디렉터리가 바뀌거나
-# 설정 파일이 볼륨으로 가려져도 'c' 키 캐시 삭제 모달이 되살아나지 않도록 여기서도 고정한다.
+# toolbarMode=minimal 은 config.toml 에도 있지만, 볼륨에 가려져도 유지되도록 여기서 고정한다.
 CMD ["streamlit", "run", "streamlit_app.py", \
      "--server.port=8501", \
      "--server.address=0.0.0.0", \

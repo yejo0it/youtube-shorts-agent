@@ -1,0 +1,188 @@
+{#
+  대시보드 마크업 조각 모음. 파이썬은 데이터만 넘기고 태그는 전부 여기서 만든다.
+  스타일은 web/styles.css, 렌더링 규칙은 app/templates.py.
+
+  헬퍼: compact/mmss/plain(필터), sentiment_label/sentiment_color/priority_label
+  LLM 이 쓴 문자열에는 `| plain` 을 건다 — 태그·마크다운이 화면에 원문으로 찍히지 않게.
+#}
+
+{# ------------------------------------------------------------------- KPI #}
+
+{% macro kpi_grid(cards) -%}
+<div class="kpi-grid">
+  {%- for card in cards %}
+  <div class="card">
+    <div class="metric-label">{{ card.label }}</div>
+    <div class="metric-value">{{ card.value }}</div>
+    {# 보조 문구가 없어도 자리는 남긴다 — 카드마다 값 위치가 흔들리지 않게 #}
+    <div class="metric-sub">{{ card.sub | default('') }}</div>
+  </div>
+  {%- endfor %}
+</div>
+{%- endmacro %}
+
+
+{# --------------------------------------------------- 공통 카드 (LLM 본문) #}
+
+{% macro card(text) -%}
+<div class="card">{{ text | plain }}</div>
+{%- endmacro %}
+
+
+{# ------------------------------------------------------------ 쇼츠 카드 #}
+
+{% macro short_card(video, rank) -%}
+<div class="short-card">
+  <div class="short-thumb-wrap">
+    <img class="short-thumb" src="{{ video.thumbnail_url }}" alt="{{ video.title }} 썸네일">
+    <span class="short-rank">#{{ rank }}</span>
+    <span class="short-dur">{{ video.duration_sec | mmss }}</span>
+  </div>
+  <div class="short-body">
+    <div class="short-title">{{ video.title }}</div>
+    <div class="short-stats">
+      ▶ {{ video.view_count | compact }} · ♥ {{ video.like_count | compact }} · 💬 {{ video.comment_count | compact }}
+      <br>좋아요율 {{ '%.2f' | format(video.like_rate) }}%
+      <br><a href="{{ video.url }}" target="_blank" rel="noopener">쇼츠 열기 ↗</a>
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
+
+{# ------------------------------------------------------------- 키워드 칩 #}
+
+{% macro keyword_chips(keywords) -%}
+{%- if keywords -%}
+{%- for k in keywords -%}
+<span class="chip"><span class="dot" style="background:{{ sentiment_color(k.sentiment) }}"></span>{{ k.keyword | plain }}<span class="n">{{ k.mention_count }}</span></span>
+{%- endfor -%}
+{%- else -%}
+<em>키워드 없음</em>
+{%- endif -%}
+{%- endmacro %}
+
+
+{# --------------------------------------------------------- 댓글 스레드 #}
+
+{% macro thread(item, video_title, max_replies=5) -%}
+{%- set shown = item.replies[:max_replies] -%}
+{%- set more = item.total_reply_count - (shown | length) -%}
+<div class="thread">
+  <div class="thread-head">
+    {{ item.author }} · ♥ {{ '{:,}'.format(item.like_count) }} · 대댓글 {{ item.total_reply_count }}개
+    · {{ video_title }}
+  </div>
+  <div class="thread-text">{{ item.text }}</div>
+  {%- for reply in shown %}
+  <div class="reply">
+    <div class="thread-head">↳ {{ reply.author }} · ♥ {{ '{:,}'.format(reply.like_count) }}</div>
+    <div class="reply-text">{{ reply.text }}</div>
+  </div>
+  {%- endfor %}
+  {%- if more > 0 %}
+  <div class="thread-head thread-more">… 대댓글 {{ more }}개 더</div>
+  {%- endif %}
+</div>
+{%- endmacro %}
+
+
+{# ------------------------------------------------- 채널 종합 분석 (강조) #}
+
+{% macro channel_overall(overall) -%}
+<div class="overall">
+  <div class="overall-badge">AI 채널 종합 분석</div>
+  <div class="overall-headline">{{ overall.headline | plain }}</div>
+  {# (1) 채널 핵심 성과 요약 #}
+  <div class="overall-summary">{{ overall.performance_summary | plain }}</div>
+  {%- if overall.performance_highlights %}
+  <div class="overall-highlights">
+    {%- for line in overall.performance_highlights %}
+    <div class="overall-highlight">{{ line | plain }}</div>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+  <div class="overall-grid">
+    {# (2) 인기 쇼츠 성공 요인 #}
+    <div class="overall-section">
+      <h4>🚀 인기 쇼츠 성공 요인</h4>
+      {%- for factor in overall.success_factors %}
+      <div class="overall-item">
+        <div class="overall-item-title">{{ factor.factor | plain }}</div>
+        <div class="overall-item-body">{{ factor.evidence | plain }}</div>
+        {%- if factor.example_videos %}
+        <div class="overall-item-meta">예: {{ factor.example_videos | map('plain') | join(' · ') }}</div>
+        {%- endif %}
+      </div>
+      {%- else %}
+      <div class="overall-item-body">도출된 성공 요인이 없습니다.</div>
+      {%- endfor %}
+    </div>
+    {# (3) 시청자 반응 트렌드 #}
+    <div class="overall-section">
+      <h4>📊 시청자 반응 트렌드</h4>
+      {%- for item in overall.reaction_trends %}
+      <div class="overall-item">
+        <div class="overall-item-title">
+          <span class="tag tag-{{ item.sentiment }}">{{ sentiment_label(item.sentiment) }}</span>{{ item.trend | plain }}
+        </div>
+        <div class="overall-item-body">{{ item.detail | plain }}</div>
+      </div>
+      {%- else %}
+      <div class="overall-item-body">도출된 반응 트렌드가 없습니다.</div>
+      {%- endfor %}
+    </div>
+    {# (4) 향후 콘텐츠 전략 제안 #}
+    <div class="overall-section">
+      <h4>🎯 향후 콘텐츠 전략</h4>
+      {%- for item in overall.content_strategy %}
+      <div class="overall-item">
+        <div class="overall-item-title">
+          <span class="tag tag-{{ item.priority }}">{{ priority_label(item.priority) }}</span>{{ item.title | plain }}
+        </div>
+        <div class="overall-item-body">{{ item.action | plain }}</div>
+        <div class="overall-item-meta">근거: {{ item.rationale | plain }}<br>기대 효과: {{ item.expected_effect | plain }}</div>
+      </div>
+      {%- else %}
+      <div class="overall-item-body">도출된 전략 제안이 없습니다.</div>
+      {%- endfor %}
+    </div>
+  </div>
+  {%- if overall.risks %}
+  <div class="overall-risks">
+    <h4>⚠️ 지켜봐야 할 리스크</h4>
+    <ul>
+      {%- for risk in overall.risks %}
+      <li>{{ risk | plain }}</li>
+      {%- endfor %}
+    </ul>
+  </div>
+  {%- endif %}
+</div>
+{%- endmacro %}
+
+
+{% macro overall_empty(message, hint='') -%}
+<div class="overall-empty">
+  <strong>{{ message }}</strong>
+  {%- if hint %}<br>{{ hint }}{% endif %}
+</div>
+{%- endmacro %}
+
+
+{# --------------------------------------------------------------- 첫 화면 #}
+
+{% macro hero() -%}
+<div class="hero">
+  <h1>📊 유튜브 쇼츠 채널 분석 에이전트</h1>
+  <p>
+    60초 이하 <strong>쇼츠만</strong> 선별해 성과와 댓글·대댓글 반응을 분석합니다.
+    롱폼은 <code>videos.list</code> 단계에서 제외되므로 댓글 API 호출이 발생하지 않습니다.
+  </p>
+  <ul>
+    <li><strong>성과 지표</strong> — 조회수·좋아요·댓글·영상 길이·게시 빈도</li>
+    <li><strong>반응 분석</strong> — 댓글/대댓글 감정 분포와 반복 키워드</li>
+    <li><strong>채널 종합 분석</strong> — 성과 요약, 인기 쇼츠 성공 요인, 반응 트렌드, 콘텐츠 전략</li>
+  </ul>
+</div>
+{%- endmacro %}

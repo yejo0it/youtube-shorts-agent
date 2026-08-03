@@ -1,0 +1,233 @@
+/* 대시보드 스타일 시트.
+ * 색 값은 리터럴로 두지 않는다 — app/theme.py 토큰이 `:root` 로 주입되고 여기선 var() 로만 쓴다.
+ */
+
+/* 전체 너비 — 기본 max-width 제한을 풀고 좌우 여백만 남긴다. */
+.block-container {
+  padding-top: 2.2rem;
+  padding-left: 2rem;
+  padding-right: 2rem;
+  max-width: 100%;
+}
+[data-testid="stMainBlockContainer"] { max-width: 100%; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+/* KPI 카드는 st.columns 대신 grid 한 장 — auto-fit 으로 너비를, stretch 로 높이를 맞춘다.
+   보조 문구는 margin-top:auto 로 바닥에 붙여 카드 간 기준선을 유지한다. */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin: 6px 0 2px;
+}
+.kpi-grid .card {
+  display: flex;
+  flex-direction: column;
+  min-height: 116px;
+}
+.metric-label {
+  color: var(--ink-muted); font-size: 0.8rem; letter-spacing: .02em;
+  margin-bottom: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.metric-value {
+  color: var(--ink-primary); font-size: 1.75rem; font-weight: 650; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.metric-sub {
+  color: var(--ink-secondary); font-size: 0.78rem;
+  margin-top: auto; padding-top: 8px; min-height: 1.1em;
+}
+
+.short-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  /* 전체 너비에서 세로 썸네일이 화면을 삼키지 않도록 카드 폭만 묶는다. */
+  max-width: 280px;
+  margin-inline: auto;
+}
+.short-thumb-wrap { position: relative; }
+.short-thumb {
+  display: block; width: 100%; aspect-ratio: 9 / 16;
+  object-fit: cover; background: var(--gridline);
+}
+.short-rank {
+  position: absolute; top: 8px; left: 8px;
+  background: rgba(11,11,11,.78); color: #fff;
+  font-size: .75rem; font-weight: 650;
+  padding: 2px 8px; border-radius: 999px;
+}
+.short-dur {
+  position: absolute; bottom: 8px; right: 8px;
+  background: rgba(11,11,11,.78); color: #fff;
+  font-size: .72rem; padding: 2px 6px; border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.short-body { padding: 10px 12px 12px; }
+.short-title {
+  color: var(--ink-primary); font-size: .85rem; font-weight: 600;
+  line-height: 1.35; height: 2.7em; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.short-stats {
+  color: var(--ink-secondary); font-size: .78rem; margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.short-stats a { color: var(--series-0); text-decoration: none; }
+
+.chip {
+  display: inline-block; border: 1px solid var(--border); border-radius: 999px;
+  padding: 4px 11px; margin: 0 6px 6px 0; font-size: .82rem;
+  color: var(--ink-primary); background: var(--surface);
+}
+.chip .dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 7px; vertical-align: middle;
+}
+.chip .n { color: var(--ink-muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
+
+.thread {
+  border-left: 2px solid var(--gridline); padding: 2px 0 2px 14px; margin-bottom: 14px;
+}
+.thread-head { color: var(--ink-muted); font-size: .76rem; margin-bottom: 3px; }
+/* 본문은 전체 너비를 다 쓰지 않는다 — 한 줄이 길어지면 읽기 어려워진다. */
+.thread-text { color: var(--ink-primary); font-size: .9rem; line-height: 1.5; max-width: 90ch; }
+.reply {
+  margin: 8px 0 0 16px; padding-left: 12px;
+  border-left: 2px solid var(--gridline);
+}
+.reply-text {
+  color: var(--ink-secondary); font-size: .84rem; line-height: 1.45; max-width: 88ch;
+}
+.thread-more { margin-left: 16px; }
+
+/* ------------------------------------------------- 채널 종합 분석 (강조 영역)
+   가장 먼저 읽혀야 하는 블록이라 다른 카드보다 강한 표면(좌측 액센트 + 그림자)을 쓴다. */
+
+.overall {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--series-0);
+  border-radius: 14px;
+  padding: 20px 22px 18px;
+  margin: 8px 0 4px;
+  box-shadow: 0 1px 2px rgba(11,11,11,.04), 0 8px 24px rgba(11,11,11,.05);
+}
+.overall-badge {
+  display: inline-block;
+  background: var(--series-0); color: #fff;
+  font-size: .72rem; font-weight: 650; letter-spacing: .04em;
+  padding: 3px 10px; border-radius: 999px;
+  margin-bottom: 10px;
+}
+.overall-headline {
+  color: var(--ink-primary); font-size: 1.32rem; font-weight: 680;
+  line-height: 1.35; 
+}
+.overall-summary {
+  color: var(--ink-secondary); font-size: .93rem; line-height: 1.62;
+  margin-top: 10px; 
+}
+
+/* 수치 근거 — 값이 아니라 문장이므로 KPI 카드가 아니라 태그 형태로 나열한다. */
+.overall-highlights {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-top: 14px;
+}
+.overall-highlight {
+  background: var(--page);
+  border: 1px solid var(--gridline);
+  border-radius: 8px;
+  padding: 7px 11px;
+  color: var(--ink-primary); font-size: .82rem; line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.overall-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+.overall-section {
+  border-top: 1px solid var(--gridline);
+  padding-top: 12px;
+}
+.overall-section h4 {
+  color: var(--ink-primary); font-size: .88rem; font-weight: 650;
+  margin: 0 0 10px;
+}
+.overall-item { margin-bottom: 12px; }
+.overall-item:last-child { margin-bottom: 0; }
+.overall-item-title {
+  color: var(--ink-primary); font-size: .86rem; font-weight: 620; line-height: 1.4;
+}
+.overall-item-body {
+  color: var(--ink-secondary); font-size: .81rem; line-height: 1.55; margin-top: 3px;
+}
+.overall-item-meta {
+  color: var(--ink-muted); font-size: .76rem; line-height: 1.5; margin-top: 3px;
+}
+
+/* 우선순위 / 감정 배지 — 색은 의미(극성)를 따른다. */
+.tag {
+  display: inline-block;
+  font-size: .7rem; font-weight: 650; letter-spacing: .02em;
+  padding: 1px 7px; border-radius: 999px;
+  margin-right: 6px; vertical-align: 1px;
+  border: 1px solid transparent;
+}
+.tag-high { background: var(--sentiment-negative); color: #fff; }
+.tag-medium { background: var(--series-1); color: #fff; }
+.tag-low { background: var(--page); color: var(--ink-secondary); border-color: var(--gridline); }
+.tag-positive { background: var(--sentiment-positive); color: #fff; }
+.tag-neutral { background: var(--sentiment-neutral); color: #fff; }
+.tag-negative { background: var(--sentiment-negative); color: #fff; }
+
+.overall-risks {
+  border-top: 1px solid var(--gridline);
+  margin-top: 16px; padding-top: 12px;
+}
+.overall-risks h4 {
+  color: var(--ink-primary); font-size: .88rem; font-weight: 650; margin: 0 0 8px;
+}
+.overall-risks ul { margin: 0; padding-left: 18px; }
+.overall-risks li {
+  color: var(--ink-secondary); font-size: .82rem; line-height: 1.6; 
+}
+
+/* 분석 결과가 없을 때 자리를 지키는 안내 박스 */
+.overall-empty {
+  background: var(--page);
+  border: 1px dashed var(--gridline);
+  border-radius: 12px;
+  padding: 16px 18px;
+  color: var(--ink-secondary); font-size: .86rem; line-height: 1.6;
+}
+.overall-empty strong { color: var(--ink-primary); }
+
+/* --------------------------------------------------------------- 첫 화면 */
+
+.hero { padding: 8px 0 4px; }
+.hero h1 {
+  color: var(--ink-primary); font-size: 1.9rem; font-weight: 700;
+  margin: 0 0 10px; line-height: 1.25;
+}
+.hero p {
+  color: var(--ink-secondary); font-size: .95rem; line-height: 1.65;
+  max-width: 78ch; margin: 0 0 6px;
+}
+.hero ul { margin: 12px 0 0; padding-left: 18px; }
+.hero li {
+  color: var(--ink-secondary); font-size: .9rem; line-height: 1.7;
+}
+.hero li strong { color: var(--ink-primary); }

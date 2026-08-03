@@ -1,152 +1,33 @@
-"""Streamlit 대시보드 — 쇼츠 채널 분석 결과 시각화."""
+"""Streamlit 대시보드 — 쇼츠 채널 분석 결과 시각화.
+
+마크업은 web/ 에 있다. 여기서는 데이터만 만들어 templates.render() 로 넘긴다.
+"""
 
 from __future__ import annotations
 
-import html
 import logging
 
 import plotly.graph_objects as go
 import streamlit as st
 
-from . import exports, store, theme
+from . import exports, store, templates, theme
 from .config import settings
+from .formatting import compact, plain
 from .schemas import CrawlResult
 from .tools import crawl_channel, read_results
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+log = logging.getLogger(__name__)
 
-# 이 모듈에는 import 시점에 실행되는 Streamlit 호출이 있으면 안 된다.
-#
-# 엔트리포인트(streamlit_app.py)는 `from app.dashboard import main` 으로 이 모듈을
-# 가져온다. Streamlit 은 rerun/새 세션(F5)마다 엔트리포인트 스크립트를 다시 실행하지만,
-# 이미 sys.modules 에 올라온 모듈의 본문은 다시 실행하지 않는다. 즉 모듈 최상단에 둔
-# st.set_page_config()/st.markdown(CSS) 는 서버 프로세스당 단 한 번만 나가고,
-# 그 뒤의 모든 rerun 과 F5 에서는 누락된다 — layout="wide" 가 풀려 본문 폭이 좁아지고
-# KPI 카드가 스타일 없이 세로로 쏟아진다.
-#
-# 그래서 CSS 는 순수 문자열 상수로만 두고, 실제 주입은 main() 이 매 실행마다 한다.
-
-CSS = f"""
-<style>
-  /* 전체 너비 — 기본 max-width 제한을 풀고 좌우 여백만 남긴다. */
-  .block-container {{
-    padding-top: 2.2rem;
-    padding-left: 2rem;
-    padding-right: 2rem;
-    max-width: 100%;
-  }}
-  [data-testid="stMainBlockContainer"] {{ max-width: 100%; }}
-
-  .card {{
-    background: {theme.SURFACE};
-    border: 1px solid {theme.BORDER};
-    border-radius: 12px;
-    padding: 16px 18px;
-  }}
-
-  /* KPI 카드는 st.columns 대신 grid 한 장으로 그린다.
-     - auto-fit + minmax(0,1fr): 남는 폭을 카드가 똑같이 나눠 가짐 (너비 균일)
-     - align-items 기본값 stretch: 행 안의 카드가 가장 큰 카드 높이에 맞춰짐 (높이 균일)
-     - 보조 문구는 margin-top:auto 로 바닥에 붙어, 문구가 없는 카드와 기준선이 어긋나지 않음 */
-  .kpi-grid {{
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-    gap: 12px;
-    margin: 6px 0 2px;
-  }}
-  .kpi-grid .card {{
-    display: flex;
-    flex-direction: column;
-    min-height: 116px;
-  }}
-  .metric-label {{
-    color: {theme.INK_MUTED}; font-size: 0.8rem; letter-spacing: .02em;
-    margin-bottom: 6px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }}
-  .metric-value {{
-    color: {theme.INK_PRIMARY}; font-size: 1.75rem; font-weight: 650; line-height: 1.1;
-    font-variant-numeric: tabular-nums;
-  }}
-  .metric-sub {{
-    color: {theme.INK_SECONDARY}; font-size: 0.78rem;
-    margin-top: auto; padding-top: 8px; min-height: 1.1em;
-  }}
-
-  .short-card {{
-    background: {theme.SURFACE};
-    border: 1px solid {theme.BORDER};
-    border-radius: 12px;
-    overflow: hidden;
-    /* 전체 너비에서 세로 썸네일이 화면을 삼키지 않도록 카드 폭만 묶는다. */
-    max-width: 280px;
-    margin-inline: auto;
-  }}
-  .short-thumb-wrap {{ position: relative; }}
-  .short-thumb {{
-    display: block; width: 100%; aspect-ratio: 9 / 16;
-    object-fit: cover; background: {theme.GRIDLINE};
-  }}
-  .short-rank {{
-    position: absolute; top: 8px; left: 8px;
-    background: rgba(11,11,11,.78); color: #fff;
-    font-size: .75rem; font-weight: 650;
-    padding: 2px 8px; border-radius: 999px;
-  }}
-  .short-dur {{
-    position: absolute; bottom: 8px; right: 8px;
-    background: rgba(11,11,11,.78); color: #fff;
-    font-size: .72rem; padding: 2px 6px; border-radius: 4px;
-    font-variant-numeric: tabular-nums;
-  }}
-  .short-body {{ padding: 10px 12px 12px; }}
-  .short-title {{
-    color: {theme.INK_PRIMARY}; font-size: .85rem; font-weight: 600;
-    line-height: 1.35; height: 2.7em; overflow: hidden;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  }}
-  .short-stats {{
-    color: {theme.INK_SECONDARY}; font-size: .78rem; margin-top: 8px;
-    font-variant-numeric: tabular-nums;
-  }}
-  .short-stats a {{ color: {theme.SERIES[0]}; text-decoration: none; }}
-
-  .chip {{
-    display: inline-block; border: 1px solid {theme.BORDER}; border-radius: 999px;
-    padding: 4px 11px; margin: 0 6px 6px 0; font-size: .82rem;
-    color: {theme.INK_PRIMARY}; background: {theme.SURFACE};
-  }}
-  .chip .dot {{
-    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-    margin-right: 7px; vertical-align: middle;
-  }}
-  .chip .n {{ color: {theme.INK_MUTED}; margin-left: 6px; font-variant-numeric: tabular-nums; }}
-
-  .thread {{
-    border-left: 2px solid {theme.GRIDLINE}; padding: 2px 0 2px 14px; margin-bottom: 14px;
-  }}
-  .thread-head {{ color: {theme.INK_MUTED}; font-size: .76rem; margin-bottom: 3px; }}
-  /* 본문은 전체 너비를 다 쓰지 않는다 — 한 줄이 길어지면 읽기 어려워진다. */
-  .thread-text {{ color: {theme.INK_PRIMARY}; font-size: .9rem; line-height: 1.5; max-width: 90ch; }}
-  .reply {{
-    margin: 8px 0 0 16px; padding-left: 12px;
-    border-left: 2px solid {theme.GRIDLINE};
-  }}
-  .reply-text {{
-    color: {theme.INK_SECONDARY}; font-size: .84rem; line-height: 1.45; max-width: 88ch;
-  }}
-</style>
-"""
+# 모듈 최상단에서 st.* 를 부르면 안 된다 — rerun/F5 는 이미 import 된 모듈 본문을 건너뛰므로
+# 페이지 설정과 CSS 가 첫 실행 이후 누락된다. 둘 다 main() 이 매 실행마다 호출한다.
 
 
 # --------------------------------------------------------------- 페이지 부트스트랩
 
 
 def configure_page() -> None:
-    """페이지 설정 — 스크립트 실행마다 가장 먼저, 다른 st 호출보다 앞서 실행돼야 한다.
-
-    set_page_config 는 한 스크립트 실행에서 한 번만 허용되므로 main() 첫 줄에서만 부른다.
-    """
+    """페이지 설정. 한 실행에 한 번만 허용되므로 main() 첫 줄에서만 부른다."""
     st.set_page_config(
         page_title="쇼츠 채널 분석 에이전트",
         page_icon="📊",
@@ -156,56 +37,29 @@ def configure_page() -> None:
 
 
 def inject_custom_css() -> None:
-    """커스텀 CSS 주입. 세션 상태와 무관하게 매 실행 무조건 나가야 한다.
-
-    조건문 안에 넣거나 모듈 최상단에 두면 rerun/F5 에서 <style> 이 빠지고,
-    카드 그리드가 무너져 지표가 한 줄씩 세로로 쏟아진다.
-    """
-    st.markdown(CSS, unsafe_allow_html=True)
+    """web/styles.css 주입. 조건문 안에 넣으면 rerun 에서 빠져 카드 그리드가 무너진다."""
+    st.markdown(templates.stylesheet(), unsafe_allow_html=True)
 
 
-# ------------------------------------------------------------------ 포맷 유틸
-
-
-def compact(n: float) -> str:
-    """1234567 → '123.5만'."""
-    n = float(n)
-    if n >= 100_000_000:
-        return f"{n / 100_000_000:,.1f}억"
-    if n >= 10_000:
-        return f"{n / 10_000:,.1f}만"
-    return f"{n:,.0f}"
-
-
-def mmss(seconds: int) -> str:
-    return f"{seconds // 60}:{seconds % 60:02d}"
-
-
-def esc(text: str) -> str:
-    return html.escape(text or "")
-
-
-def metric_card(label: str, value: str, sub: str = "") -> str:
-    # 보조 문구가 없어도 .metric-sub 자리는 남긴다 — 카드마다 값 위치가 흔들리지 않게.
-    return (
-        f'<div class="card"><div class="metric-label">{esc(label)}</div>'
-        f'<div class="metric-value">{esc(value)}</div>'
-        f'<div class="metric-sub">{esc(sub)}</div></div>'
-    )
+def html(macro: str, *args, target=None, **kwargs) -> None:
+    """템플릿 매크로를 렌더해 출력한다. 한 조각이 실패해도 페이지 전체를 죽이지 않는다."""
+    container = target or st
+    try:
+        markup = templates.render(macro, *args, **kwargs)
+    except templates.TemplateRenderError as exc:
+        log.exception("템플릿 렌더 실패: %s", macro)
+        container.error(str(exc))
+        return
+    container.markdown(markup, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------- 내려받기 위젯
-
-# 직렬화 결과는 세션 상태에 들고 있는다.
-#   @st.cache_data / @st.cache_resource 로 만든 함수 캐시만 'c' 키 모달("Clear caches?")의
-#   삭제 대상이 된다. 세션 상태는 그 대상이 아니고, 내보내기 페이로드는 세션마다 다르므로
-#   애초에 전역 캐시일 이유도 없다. (모달 자체는 config.toml 의 toolbarMode 로 막는다.)
 
 _BUILDERS = {"csv": exports.shorts_csv, "json": exports.comments_json}
 
 
 def export_bytes(result: CrawlResult, kind: str) -> bytes:
-    """같은 수집 결과에 대해 rerun 마다 다시 직렬화하지 않도록 세션에 보관."""
+    """rerun 마다 다시 직렬화하지 않도록 세션에 보관 (@st.cache_data 는 'c' 키로 지워진다)."""
     key = f"{result.channel.channel_id}:{result.crawled_at}"
     memo = st.session_state.setdefault("export_memo", {})
     if memo.get("key") != key:  # 다른 채널/재수집 → 이전 페이로드는 버린다
@@ -247,16 +101,12 @@ def json_download(result: CrawlResult, key: str) -> None:
 
 # ------------------------------------------------------------------ 세션 상태
 
-# rerun(위젯 조작·내려받기 버튼 클릭 등)이 일어나도 화면이 그대로 남아 있어야 한다.
-# 그러려면 두 가지가 필요하다.
-#   1) 모든 위젯에 고정 key — key 없는 위젯의 식별자는 렌더 위치와 인자에 묶여,
-#      옵션 목록이나 렌더 조건이 바뀌면 선택값이 조용히 초기화될 수 있다.
-#   2) 수집 결과를 세션에 고정 — 매 rerun 마다 디스크에서 다시 읽으면
-#      화면에 떠 있던 채널이 '가장 최근 파일'로 슬쩍 바뀐다.
+# rerun 후 화면이 유지되려면 두 가지가 필요하다 — 모든 위젯에 고정 key(없으면 선택값이 초기화),
+# 그리고 수집 결과를 세션에 고정(매번 디스크를 읽으면 '가장 최근 파일'로 바뀐다).
 
 
 def clamp(value: int, low: int, high: int) -> int:
-    """슬라이더 범위를 벗어난 .env 설정값이 세션에 들어가면 위젯 생성이 실패한다."""
+    """슬라이더 범위를 벗어난 .env 값이 세션에 들어가면 위젯 생성이 실패한다."""
     return max(low, min(high, value))
 
 
@@ -274,8 +124,7 @@ def init_state() -> None:
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
-    # 보여줄 게 생기기 전까지만 디스크를 본다. 한 번 올라온 뒤에는 세션이
-    # 단일 진실 공급원 — rerun 이 화면 위의 채널을 최신 파일로 바꿔치지 않는다.
+    # 보여줄 게 생기기 전까지만 디스크를 본다. 이후로는 세션이 단일 진실 공급원.
     if st.session_state.get("result") is None:
         st.session_state["result"] = read_results()
 
@@ -298,10 +147,9 @@ def clear_load_notice() -> None:
 
 
 def load_saved_channel() -> None:
-    """저장된 채널을 세션 결과로 올리고, 입력창도 같은 채널로 맞춘다.
+    """저장된 채널을 세션에 올리고 입력창도 맞춘다.
 
-    on_click 콜백이라 위젯이 다시 만들어지기 전에 실행된다 — 이 시점에만
-    st.session_state['channel_input'] 을 덮어써도 예외가 나지 않는다.
+    on_click 콜백이라 위젯 재생성 전에 실행된다 — channel_input 을 덮어써도 안전한 유일한 시점.
     """
     channel_id = st.session_state.get("saved_pick")
     if not channel_id:
@@ -341,7 +189,12 @@ def sidebar() -> None:
         max_videos = st.slider("훑어볼 최근 업로드 수", 10, 200, step=10, key="max_videos")
         comment_targets = st.slider("댓글 수집 대상 쇼츠 수", 1, 50, key="comment_targets")
         max_comments = st.slider("영상당 최상위 댓글 수", 10, 100, step=10, key="max_comments")
-        run_analysis = st.checkbox("Claude 반응 분석 실행", disabled=not an_ok, key="run_analysis")
+        run_analysis = st.checkbox(
+            "Claude 분석 실행",
+            disabled=not an_ok,
+            key="run_analysis",
+            help="댓글·대댓글 반응 분석과 채널 전반 종합 분석을 함께 수행합니다.",
+        )
 
         estimated = 2 + (max_videos // 50 + 1) * 2 + comment_targets * 2
         st.caption(f"예상 쿼터 소모: 약 {estimated} units (일일 한도 10,000)")
@@ -368,9 +221,7 @@ def sidebar() -> None:
                 key="saved_pick",
                 on_change=clear_load_notice,
             )
-            # 조건부(`if picked and st.button(...)`)로 그리지 않는다. 위젯 트리에서
-            # 사라졌다 나타나는 버튼은 key 가 없으면 식별자가 렌더 위치에 묶여
-            # 불안정하다. 항상 그리고 선택 전에는 비활성화만 한다.
+            # 조건부로 그리지 않고 항상 그린다 — 나타났다 사라지는 위젯은 식별자가 불안정하다.
             st.button(
                 "불러오기",
                 width="stretch",
@@ -415,7 +266,7 @@ def run_crawl(
 
 
 def scatter_views_likes(result: CrawlResult) -> go.Figure:
-    """조회수 vs 좋아요 상관관계 — 단일 계열이므로 범례 없이 제목이 계열을 지칭."""
+    """조회수 vs 좋아요 산점도. 단일 계열이므로 범례를 두지 않는다."""
     shorts = result.shorts
     fig = go.Figure(
         go.Scatter(
@@ -442,7 +293,7 @@ def scatter_views_likes(result: CrawlResult) -> go.Figure:
 
 
 def sentiment_bar(positive: int, neutral: int, negative: int) -> go.Figure:
-    """감정 분포 — 극성이므로 파랑↔빨강 발산형, 중립은 회색."""
+    """감정 분포 누적 막대. 극성이므로 파랑↔빨강 발산형, 중립은 회색."""
     fig = go.Figure()
     for key, value in (("positive", positive), ("neutral", neutral), ("negative", negative)):
         fig.add_bar(
@@ -489,7 +340,7 @@ def render_header(result: CrawlResult) -> None:
         if channel.thumbnail_url:
             st.image(channel.thumbnail_url, width=76)
     with title:
-        st.markdown(f"## {esc(channel.title)}")
+        st.markdown(f"## {channel.title}")
         meta = [channel.custom_url, f"개설 {channel.published_at[:10]}", channel.country]
         st.caption(" · ".join(m for m in meta if m))
     with action:
@@ -498,21 +349,66 @@ def render_header(result: CrawlResult) -> None:
 
 def render_metrics(result: CrawlResult) -> None:
     subs = "비공개" if result.channel.hidden_subscriber_count else compact(result.channel.subscriber_count)
+    cadence = (
+        f"주 {result.shorts_per_week:.1f}편" if result.upload_interval_days else "산출 불가"
+    )
+    cadence_sub = (
+        f"평균 {result.upload_interval_days:.1f}일 간격" if result.upload_interval_days else "게시일 정보 부족"
+    )
     cards = [
-        ("구독자 수", subs, ""),
-        ("채널 총 조회수", compact(result.channel.view_count), f"업로드 {result.channel.video_count:,}개"),
-        ("수집 쇼츠 평균 조회수", compact(result.avg_views), f"쇼츠 {len(result.shorts)}편 기준"),
-        ("평균 좋아요 수", compact(result.avg_likes), f"좋아요율 {result.avg_like_rate:.2f}%"),
-        (
-            "수집 댓글",
-            compact(result.total_comments_collected),
-            f"스레드 {len(result.comment_threads):,}개",
-        ),
+        {"label": "구독자 수", "value": subs},
+        {
+            "label": "채널 총 조회수",
+            "value": compact(result.channel.view_count),
+            "sub": f"업로드 {result.channel.video_count:,}개",
+        },
+        {
+            "label": "수집 쇼츠 평균 조회수",
+            "value": compact(result.avg_views),
+            "sub": f"쇼츠 {len(result.shorts)}편 기준",
+        },
+        {
+            "label": "평균 좋아요 수",
+            "value": compact(result.avg_likes),
+            "sub": f"좋아요율 {result.avg_like_rate:.2f}%",
+        },
+        {"label": "쇼츠 게시 빈도", "value": cadence, "sub": cadence_sub},
+        {
+            "label": "수집 댓글",
+            "value": compact(result.total_comments_collected),
+            "sub": f"스레드 {len(result.comment_threads):,}개",
+        },
     ]
-    # st.columns 는 카드마다 별도 블록이라 높이가 내용에 따라 들쭉날쭉해진다.
-    # grid 한 장으로 그려 너비·높이를 한 번에 맞춘다.
-    grid = "".join(metric_card(label, value, sub) for label, value, sub in cards)
-    st.markdown(f'<div class="kpi-grid">{grid}</div>', unsafe_allow_html=True)
+    # st.columns 대신 grid 한 장 — 카드 너비·높이를 한 번에 맞춘다.
+    html("kpi_grid", cards=cards)
+
+
+def render_overall(result: CrawlResult) -> None:
+    """채널 종합 분석 — 지표 바로 아래에 놓이는 강조 블록."""
+    st.markdown("### 🧭 채널 종합 분석 리포트")
+
+    overall = result.overall
+    if overall is None:
+        if result.overall_error:
+            html(
+                "overall_empty",
+                "종합 분석을 완료하지 못했습니다.",
+                result.overall_error,
+            )
+        else:
+            html(
+                "overall_empty",
+                "이 채널은 종합 분석 없이 수집되었습니다.",
+                "사이드바에서 **Claude 분석 실행**을 켜고 다시 수집하면 성과 요약·성공 요인·"
+                "반응 트렌드·콘텐츠 전략 리포트가 여기에 표시됩니다.",
+            )
+        return
+
+    html("channel_overall", overall)
+    st.caption(
+        f"수집한 쇼츠 {len(result.shorts)}편의 성과 지표와 댓글 "
+        f"{result.total_comments_collected:,}건을 함께 놓고 Claude 가 작성한 리포트입니다."
+    )
 
 
 def render_top_shorts(result: CrawlResult) -> None:
@@ -534,27 +430,7 @@ def render_top_shorts(result: CrawlResult) -> None:
     for row_start in range(0, len(top), 5):
         chunk = top[row_start : row_start + 5]
         for offset, (column, video) in enumerate(zip(st.columns(5), chunk)):
-            rank = row_start + offset + 1
-            column.markdown(
-                f"""
-                <div class="short-card">
-                  <div class="short-thumb-wrap">
-                    <img class="short-thumb" src="{esc(video.thumbnail_url)}" alt="{esc(video.title)} 썸네일">
-                    <span class="short-rank">#{rank}</span>
-                    <span class="short-dur">{mmss(video.duration_sec)}</span>
-                  </div>
-                  <div class="short-body">
-                    <div class="short-title">{esc(video.title)}</div>
-                    <div class="short-stats">
-                      ▶ {compact(video.view_count)} · ♥ {compact(video.like_count)} · 💬 {compact(video.comment_count)}
-                      <br>좋아요율 {video.like_rate:.2f}%
-                      <br><a href="{esc(video.url)}" target="_blank" rel="noopener">쇼츠 열기 ↗</a>
-                    </div>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            html("short_card", video, row_start + offset + 1, target=column)
 
 
 def render_analysis(result: CrawlResult) -> None:
@@ -568,7 +444,7 @@ def render_analysis(result: CrawlResult) -> None:
             st.info("이 채널은 반응 분석 없이 수집되었습니다. 사이드바에서 분석을 켜고 다시 수집하세요.")
         return
 
-    st.markdown(f'<div class="card">{esc(analysis.overall_summary)}</div>', unsafe_allow_html=True)
+    html("card", analysis.overall_summary)
     st.write("")
 
     left, right = st.columns([1, 1])
@@ -584,22 +460,16 @@ def render_analysis(result: CrawlResult) -> None:
             width="stretch",
             config={"displayModeBar": False},
         )
-        st.caption(analysis.sentiment.rationale)
+        st.caption(plain(analysis.sentiment.rationale))
 
     with right:
         st.markdown("**반복 등장 키워드**")
-        chips = "".join(
-            f'<span class="chip">'
-            f'<span class="dot" style="background:{theme.SENTIMENT_COLORS[k.sentiment]}"></span>'
-            f"{esc(k.keyword)}<span class=\"n\">{k.mention_count}</span></span>"
-            for k in analysis.top_keywords
-        )
-        st.markdown(chips or "<em>키워드 없음</em>", unsafe_allow_html=True)
+        html("keyword_chips", analysis.top_keywords)
         with st.expander("키워드별 대표 댓글"):
             for keyword in analysis.top_keywords:
                 st.markdown(
-                    f"- **{esc(keyword.keyword)}** "
-                    f"({theme.SENTIMENT_LABELS[keyword.sentiment]}) — {esc(keyword.example)}"
+                    f"- **{plain(keyword.keyword)}** "
+                    f"({theme.SENTIMENT_LABELS[keyword.sentiment]}) — {plain(keyword.example)}"
                 )
 
     st.write("")
@@ -613,19 +483,19 @@ def render_analysis(result: CrawlResult) -> None:
         with column:
             st.markdown(f"**{title}**")
             for item in items or ["—"]:
-                st.markdown(f"- {esc(item)}")
+                st.markdown(f"- {plain(item)}")
 
     st.markdown("**🎬 다음 쇼츠 기획 제안**")
     for rec in analysis.content_recommendations or ["—"]:
-        st.markdown(f"- {esc(rec)}")
+        st.markdown(f"- {plain(rec)}")
 
     if analysis.per_video:
         with st.expander("영상별 반응 요약"):
             for insight in analysis.per_video:
                 st.markdown(
-                    f"**{esc(insight.title)}** "
+                    f"**{plain(insight.title)}** "
                     f"({theme.SENTIMENT_LABELS[insight.dominant_sentiment]})  \n"
-                    f"{esc(insight.reaction_summary)}"
+                    f"{plain(insight.reaction_summary)}"
                 )
 
 
@@ -638,8 +508,7 @@ def render_threads(result: CrawlResult) -> None:
     titles = {v.video_id: v.title for v in result.shorts}
     ids = [None] + list(dict.fromkeys(t.video_id for t in result.comment_threads))
     labels = {None: "전체", **{vid: titles.get(vid, vid)[:45] for vid in ids[1:]}}
-    # 채널마다 별도 key — 다른 채널을 불러왔을 때 이전 채널의 videoId 가 남아
-    # 옵션 목록에 없는 값을 가리키는 일을 막는다.
+    # 채널마다 별도 key — 이전 채널의 videoId 가 남아 없는 옵션을 가리키는 일을 막는다.
     video_id = st.selectbox(
         "영상 필터",
         options=ids,
@@ -650,31 +519,8 @@ def render_threads(result: CrawlResult) -> None:
     threads = result.comment_threads if video_id is None else result.threads_for(video_id)
     top = sorted(threads, key=lambda t: t.like_count, reverse=True)[:15]
 
-    for thread in top:
-        replies_html = "".join(
-            f'<div class="reply"><div class="thread-head">↳ {esc(r.author)} · ♥ {r.like_count:,}</div>'
-            f'<div class="reply-text">{esc(r.text)}</div></div>'
-            for r in thread.replies[:5]
-        )
-        more = thread.total_reply_count - min(len(thread.replies), 5)
-        more_html = (
-            f'<div class="thread-head" style="margin-left:16px">… 대댓글 {more}개 더</div>'
-            if more > 0
-            else ""
-        )
-        st.markdown(
-            f"""
-            <div class="thread">
-              <div class="thread-head">
-                {esc(thread.author)} · ♥ {thread.like_count:,} · 대댓글 {thread.total_reply_count}개
-                · {esc(titles.get(thread.video_id, thread.video_id)[:40])}
-              </div>
-              <div class="thread-text">{esc(thread.text)}</div>
-              {replies_html}{more_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    for item in top:
+        html("thread", item, titles.get(item.video_id, item.video_id)[:40])
 
 
 def render_charts(result: CrawlResult) -> None:
@@ -744,8 +590,7 @@ def render_footer(result: CrawlResult) -> None:
 
 
 def main() -> None:
-    # 순서 고정: 페이지 설정 → CSS → 그 외 모든 렌더.
-    # 이 두 줄은 어떤 조건문에도 들어가지 않는다 (F5/rerun 마다 100% 재실행).
+    # 순서 고정: 페이지 설정 → CSS → 나머지. 앞 두 줄은 어떤 조건문에도 넣지 않는다.
     configure_page()
     inject_custom_css()
 
@@ -754,17 +599,15 @@ def main() -> None:
 
     result: CrawlResult | None = current_result()
     if result is None:
-        st.title("📊 유튜브 쇼츠 채널 분석 에이전트")
-        st.markdown(
-            "60초 이하 **쇼츠만** 선별해 성과와 댓글·대댓글 반응을 분석합니다. "
-            "롱폼은 `videos.list` 단계에서 제외되므로 댓글 API 호출이 발생하지 않습니다."
-        )
+        html("hero")
         st.info("왼쪽 사이드바에서 채널을 입력하고 **수집 시작**을 누르세요.")
         return
 
     render_header(result)
     render_metrics(result)
     st.write("")
+    render_overall(result)
+    st.divider()
     render_top_shorts(result)
     st.divider()
     render_analysis(result)

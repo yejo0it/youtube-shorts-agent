@@ -1,11 +1,7 @@
 """에이전트 도구 정의.
 
-- youtube_channel_crawler : 쇼츠 전용 수집 + LLM 반응 분석
-- get_crawling_results    : 수집 결과를 구조화(JSON)해 반환
-
-두 함수 모두 @beta_tool 로 감싸 Claude tool runner 에 그대로 넘길 수 있고,
-`.__wrapped__` 없이도 대시보드에서 직접 호출할 수 있도록 순수 구현
-(crawl_channel / read_results)을 별도로 노출한다.
+@beta_tool 로 감싼 두 도구(youtube_channel_crawler / get_crawling_results)는 Claude tool
+runner 용이고, 대시보드가 직접 부를 수 있도록 순수 구현(crawl_channel / read_results)도 함께 노출한다.
 """
 
 from __future__ import annotations
@@ -18,7 +14,7 @@ from typing import Callable
 from anthropic import beta_tool
 
 from . import store
-from .analyzer import analyze_comments
+from .analyzer import analyze_channel, analyze_comments
 from .config import settings
 from .schemas import CrawlResult
 from .youtube_client import YouTubeClient
@@ -40,10 +36,7 @@ def crawl_channel(
     include_analysis: bool = True,
     progress: ProgressFn = None,
 ) -> CrawlResult:
-    """채널의 쇼츠(60초 이하)와 댓글/대댓글을 수집하고 반응을 분석한다.
-
-    롱폼은 videos.list 단계에서 제외되므로 댓글 호출이 발생하지 않는다.
-    """
+    """쇼츠(60초 이하)와 댓글을 수집해 분석한다. 롱폼은 videos.list 단계에서 제외된다."""
     report = progress or _noop
     max_videos = max_videos or settings.default_max_videos
     max_comments_per_video = max_comments_per_video or settings.default_max_comments_per_video
@@ -89,14 +82,23 @@ def crawl_channel(
         longform_excluded=excluded,
     )
 
-    # 5) LLM 반응 분석
+    # 5) LLM 반응 분석 — 댓글이 있을 때만
     if include_analysis and threads:
-        report("Claude 가 시청자 반응을 분석하는 중…", 0.85)
+        report("Claude 가 시청자 반응을 분석하는 중…", 0.8)
         try:
             result.analysis = analyze_comments(profile.title, shorts, threads)
         except Exception as exc:  # noqa: BLE001 - 분석 실패해도 수집 결과는 살린다
             log.exception("댓글 분석 실패")
             result.analysis_error = str(exc)
+
+    # 6) 채널 종합 분석 — 지표만으로도 돌아가므로 5가 실패해도 실행한다.
+    if include_analysis and shorts:
+        report("Claude 가 채널 전반을 종합 분석하는 중…", 0.9)
+        try:
+            result.overall = analyze_channel(result)
+        except Exception as exc:  # noqa: BLE001 - 종합 분석 실패도 수집 결과를 버리지 않는다
+            log.exception("채널 종합 분석 실패")
+            result.overall_error = str(exc)
 
     store.save(result)
     report("완료", 1.0)
@@ -109,8 +111,9 @@ def read_results(channel_id: str = "") -> CrawlResult | None:
 
 
 def summarize_for_model(result: CrawlResult, top_n: int = 10) -> dict:
-    """LLM 컨텍스트에 넣기 좋은 축약 구조 (댓글 원문 전체는 제외)."""
+    """LLM 컨텍스트용 축약 구조 (댓글 원문 전체는 제외)."""
     analysis = result.analysis
+    overall = result.overall
     return {
         "channel": {
             "channel_id": result.channel.channel_id,
@@ -133,6 +136,9 @@ def summarize_for_model(result: CrawlResult, top_n: int = 10) -> dict:
             "avg_views": round(result.avg_views, 1),
             "avg_likes": round(result.avg_likes, 1),
             "avg_like_rate_pct": round(result.avg_like_rate, 2),
+            "avg_duration_sec": round(result.avg_duration_sec, 1),
+            "upload_interval_days": round(result.upload_interval_days, 2),
+            "shorts_per_week": round(result.shorts_per_week, 2),
         },
         "top_shorts": [
             {
@@ -158,6 +164,8 @@ def summarize_for_model(result: CrawlResult, top_n: int = 10) -> dict:
         ],
         "analysis": analysis.model_dump() if analysis else None,
         "analysis_error": result.analysis_error or None,
+        "channel_overall_analysis": overall.model_dump() if overall else None,
+        "channel_overall_analysis_error": result.overall_error or None,
     }
 
 
@@ -180,7 +188,8 @@ def youtube_channel_crawler(
         channel: 채널 ID(UC...), @핸들, 또는 채널 URL.
         max_videos: 쇼츠 판별을 위해 훑어볼 최근 업로드 개수. 기본 60.
         max_comments_per_video: 영상 한 편당 수집할 최상위 댓글 수. 기본 50.
-        include_analysis: True 면 수집 직후 댓글 감정/키워드 분석까지 수행한다.
+        include_analysis: True 면 수집 직후 댓글 감정/키워드 분석과
+            채널 전반 종합 분석(성과 요약·성공 요인·반응 트렌드·콘텐츠 전략)까지 수행한다.
 
     Returns:
         수집 요약과 분석 결과가 담긴 JSON 문자열.
@@ -202,7 +211,8 @@ def youtube_channel_crawler(
 def get_crawling_results(channel_id: str = "") -> str:
     """이미 수집한 쇼츠 채널 데이터를 구조화된 JSON 으로 반환한다.
 
-    채널 메타데이터, 쇼츠 성과 순위, 시청자 댓글/대댓글 분석 종합 데이터를 포함한다.
+    채널 메타데이터, 쇼츠 성과 순위, 시청자 댓글/대댓글 분석,
+    그리고 채널 전반 종합 분석(channel_overall_analysis)을 포함한다.
 
     Args:
         channel_id: 조회할 채널 ID. 비워두면 가장 최근에 수집한 채널을 반환한다.

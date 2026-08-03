@@ -28,11 +28,11 @@ class Settings:
     youtube_api_key: str = field(default_factory=lambda: os.getenv("YOUTUBE_API_KEY", ""))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
 
-    # Claude 모델 — 댓글 반응 분석 및 에이전트 루프에 사용
+    # Claude 모델 — 분석과 에이전트 루프에 사용
     model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-opus-5"))
     effort: str = field(default_factory=lambda: os.getenv("CLAUDE_EFFORT", "high"))
 
-    # 쇼츠 판별 기준 (초). 60초 이하만 분석 대상.
+    # 쇼츠 판별 기준 (초)
     shorts_max_duration_sec: int = field(
         default_factory=lambda: _int_env("SHORTS_MAX_DURATION_SEC", 60)
     )
@@ -42,7 +42,7 @@ class Settings:
     default_max_comments_per_video: int = field(
         default_factory=lambda: _int_env("MAX_COMMENTS_PER_VIDEO", 50)
     )
-    # 댓글을 수집할 상위 쇼츠 개수 (조회수 기준). commentThreads 호출 수를 제한한다.
+    # 댓글을 수집할 상위 쇼츠 개수 — commentThreads 호출 수를 제한한다
     comment_target_video_count: int = field(
         default_factory=lambda: _int_env("COMMENT_TARGET_VIDEO_COUNT", 15)
     )
@@ -56,7 +56,7 @@ class Settings:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             return self.data_dir
         except OSError:
-            # 컨테이너 밖(로컬 실행)에서 /data 를 못 쓰는 경우 프로젝트 하위로 폴백
+            # 로컬 실행에서 /data 를 못 쓰면 프로젝트 하위로 폴백
             fallback = Path(__file__).resolve().parent.parent / ".data"
             fallback.mkdir(parents=True, exist_ok=True)
             return fallback
