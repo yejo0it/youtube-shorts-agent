@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 Sentiment = Literal["positive", "negative", "neutral"]
+Priority = Literal["high", "medium", "low"]
 
 
 # ---------------------------------------------------------------- 수집 데이터
@@ -124,6 +126,60 @@ class CommentAnalysis(BaseModel):
     per_video: list[VideoInsight] = Field(description="영상별 반응 요약")
 
 
+# --------------------------------------------------- LLM 채널 종합 분석 결과
+
+# 댓글만 보는 CommentAnalysis 와 달리, 쇼츠 메타데이터와 반응을 함께 놓고 판단한 결과다.
+
+
+class SuccessFactor(BaseModel):
+    """인기 쇼츠의 성공 요인 — 지표와 반응을 함께 근거로 삼는다."""
+
+    factor: str = Field(description="성공 요인을 한 문장으로 (예: '3초 안에 결론부터 보여주는 구성')")
+    evidence: str = Field(description="이 요인을 뒷받침하는 수치·댓글 근거")
+    example_videos: list[str] = Field(description="이 요인이 드러난 대표 쇼츠 제목 1-3개")
+
+
+class ReactionTrend(BaseModel):
+    """시청자 반응에서 반복적으로 관측되는 흐름."""
+
+    trend: str = Field(description="반응 트렌드를 한 문장으로")
+    sentiment: Sentiment = Field(description="이 트렌드의 지배적 감정")
+    detail: str = Field(description="어떤 영상/댓글에서 관측됐는지 구체적 설명")
+
+
+class StrategyProposal(BaseModel):
+    """다음 분기 콘텐츠 전략 — 바로 실행 가능한 단위로."""
+
+    title: str = Field(description="제안 제목 (짧게)")
+    action: str = Field(description="채널 운영자가 실제로 취할 행동")
+    rationale: str = Field(description="이 제안이 이 채널에 유효한 이유 (수집 데이터 근거)")
+    expected_effect: str = Field(description="기대 효과")
+    priority: Priority = Field(description="실행 우선순위")
+
+
+class ChannelOverallAnalysis(BaseModel):
+    """수집 쇼츠 전체 성과 + 시청자 반응을 통합한 채널 종합 리포트."""
+
+    headline: str = Field(description="채널 상태를 한 줄로 요약한 핵심 진단")
+
+    # (1) 채널 핵심 성과 요약
+    performance_summary: str = Field(description="채널 핵심 성과 총평 (4-6문장)")
+    performance_highlights: list[str] = Field(
+        description="성과 요약을 뒷받침하는 수치 근거 3-5개 (각 한 줄, 반드시 실제 지표 인용)"
+    )
+
+    # (2) 인기 쇼츠 성공 요인
+    success_factors: list[SuccessFactor] = Field(description="상위 성과 쇼츠의 공통 성공 요인 3-5개")
+
+    # (3) 시청자 반응 트렌드
+    reaction_trends: list[ReactionTrend] = Field(description="시청자 반응에서 읽히는 트렌드 3-5개")
+
+    # (4) 향후 콘텐츠 전략 제안
+    content_strategy: list[StrategyProposal] = Field(description="향후 콘텐츠 전략 제안 3-5개")
+
+    risks: list[str] = Field(description="지금 방치하면 성과를 갉아먹을 리스크 2-4개")
+
+
 # ------------------------------------------------------------ 크롤링 결과 묶음
 
 
@@ -135,12 +191,14 @@ class CrawlResult(BaseModel):
     shorts: list[ShortsVideo] = Field(default_factory=list)
     comment_threads: list[CommentThread] = Field(default_factory=list)
     analysis: CommentAnalysis | None = None
+    overall: ChannelOverallAnalysis | None = None  # 예전 저장 파일에는 없으므로 기본값 None
     quota: QuotaReport = Field(default_factory=QuotaReport)
 
     # 필터링 통계
     videos_scanned: int = 0
     longform_excluded: int = 0
     analysis_error: str = ""
+    overall_error: str = ""
 
     # ---- 파생 지표 -------------------------------------------------------
 
@@ -164,6 +222,39 @@ class CrawlResult(BaseModel):
     @property
     def total_comments_collected(self) -> int:
         return sum(1 + len(t.replies) for t in self.comment_threads)
+
+    @property
+    def avg_duration_sec(self) -> float:
+        return sum(v.duration_sec for v in self.shorts) / len(self.shorts) if self.shorts else 0.0
+
+    @property
+    def publish_dates(self) -> list[datetime]:
+        """게시일이 파싱되는 쇼츠만, 오래된 순으로."""
+        parsed = []
+        for video in self.shorts:
+            raw = (video.published_at or "").replace("Z", "+00:00")
+            try:
+                parsed.append(datetime.fromisoformat(raw))
+            except ValueError:
+                continue
+        return sorted(parsed)
+
+    @property
+    def publish_span_days(self) -> float:
+        """가장 오래된 쇼츠와 최신 쇼츠 사이의 기간(일)."""
+        dates = self.publish_dates
+        return (dates[-1] - dates[0]).total_seconds() / 86_400 if len(dates) >= 2 else 0.0
+
+    @property
+    def upload_interval_days(self) -> float:
+        """쇼츠 게시 간격 평균(일). 0 이면 산출 불가(게시일 2개 미만)."""
+        span = self.publish_span_days
+        return span / (len(self.publish_dates) - 1) if span else 0.0
+
+    @property
+    def shorts_per_week(self) -> float:
+        interval = self.upload_interval_days
+        return 7 / interval if interval else 0.0
 
     def top_shorts(self, by: str = "view_count", limit: int = 10) -> list[ShortsVideo]:
         return sorted(self.shorts, key=lambda v: getattr(v, by), reverse=True)[:limit]

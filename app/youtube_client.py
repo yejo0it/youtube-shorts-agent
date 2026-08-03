@@ -6,8 +6,7 @@
   3. videos.list          (1 unit / 50건) — duration 확인 후 60초 이하만 통과
   4. commentThreads.list  (1 unit / 100건) — 쇼츠별 댓글 + 대댓글
 
-롱폼(60초 초과)은 3단계에서 완전히 제외되므로 4단계 댓글 호출이 발생하지 않는다.
-이것이 이 크롤러의 핵심 쿼터 절감 지점이다.
+롱폼은 3단계에서 제외되어 4단계 호출이 발생하지 않는다 — 핵심 쿼터 절감 지점.
 """
 
 from __future__ import annotations
@@ -220,11 +219,7 @@ class YouTubeClient:
     # ------------------------------------------------ 3) 쇼츠 필터링 + 메타
 
     def fetch_shorts(self, video_ids: list[str]) -> tuple[list[ShortsVideo], int]:
-        """videos.list — duration 확인 후 60초 이하만 반환.
-
-        Returns:
-            (쇼츠 목록, 제외된 롱폼 개수)
-        """
+        """videos.list — 60초 이하만 통과. (쇼츠 목록, 제외된 롱폼 수)를 반환한다."""
         shorts: list[ShortsVideo] = []
         excluded = 0
 
@@ -240,8 +235,7 @@ class YouTubeClient:
                 content = item.get("contentDetails", {})
                 duration = parse_duration(content.get("duration", ""))
 
-                # 60초 초과 = 롱폼 → 분석 대상에서 완전 제외
-                # duration <= 0 인 경우는 라이브/프리미어 → 역시 제외
+                # 롱폼(60초 초과)과 라이브/프리미어(duration <= 0)는 제외
                 if duration <= 0 or duration > self.shorts_max_duration_sec:
                     excluded += 1
                     continue
@@ -276,8 +270,7 @@ class YouTubeClient:
     ) -> list[CommentThread]:
         """commentThreads.list — 주요 댓글 + 대댓글.
 
-        part=replies 는 대댓글을 최대 5개까지만 끼워주므로, 그보다 많은 스레드는
-        comments.list 로 이어서 가져온다(스레드당 최대 max_reply_pages 페이지).
+        part=replies 는 대댓글을 5개까지만 주므로, 초과분은 comments.list 로 이어 받는다.
         """
         threads: list[CommentThread] = []
         page_token: str | None = None

@@ -1,7 +1,6 @@
 """Claude tool runner 기반 에이전트 루프.
 
-대시보드 없이 CLI 로도 돌릴 수 있다:
-    python -m app.agent "@channelhandle 채널 쇼츠 반응 분석해줘"
+CLI: python -m app.agent "@channelhandle 채널 쇼츠 반응 분석해줘"
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ SYSTEM_PROMPT = """당신은 유튜브 쇼츠 채널 분석 에이전트입니�
 
 
 def run_agent(user_prompt: str, api_key: str | None = None, model: str | None = None) -> str:
-    """도구를 붙인 상태로 에이전트를 끝까지 돌리고 최종 텍스트를 반환한다."""
+    """도구를 붙여 에이전트를 끝까지 돌리고 최종 텍스트를 반환한다."""
     key = api_key or settings.anthropic_api_key
     if not key:
         raise ValueError("ANTHROPIC_API_KEY 가 설정되지 않았습니다.")

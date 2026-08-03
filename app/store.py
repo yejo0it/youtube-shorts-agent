@@ -1,7 +1,6 @@
 """크롤링 결과 저장소 — 프로세스 메모리 + JSON 파일 영속화.
 
-에이전트가 youtube_channel_crawler 로 수집한 결과를 저장해 두면,
-get_crawling_results 나 대시보드가 재수집 없이 같은 데이터를 읽어간다.
+한 번 수집해 두면 에이전트와 대시보드가 재수집 없이 같은 데이터를 읽어간다.
 """
 
 from __future__ import annotations
@@ -60,7 +59,7 @@ def load(channel_id: str) -> CrawlResult | None:
 
 
 def latest() -> CrawlResult | None:
-    """가장 최근에 수집한 결과. 프로세스 재시작 시 디스크에서 최신 파일을 찾는다."""
+    """가장 최근 수집 결과. 메모리가 비었으면 디스크에서 최신 파일을 찾는다."""
     if _LATEST_KEY and _LATEST_KEY in _MEMORY:
         return _MEMORY[_LATEST_KEY]
 
