@@ -242,11 +242,17 @@ http://localhost:8501
 
 | 변수 | 설명 |
 |---|---|
-| `YOUTUBE_API_KEY` | YouTube Data API v3 인증 키 |
 | `ANTHROPIC_API_KEY` | LLM 분석 API 키 |
 | `DATA_DIR` | 수집 결과 저장 경로 |
+| `YOUTUBE_API_KEY` | **CLI 에이전트 전용** 폴백 키. 대시보드는 읽지 않습니다 |
+| `SERVER_PUBLIC_IP` | 키 제한 안내에 표시할 서버 고정 IP (선택) |
+| `SESSION_DATA_TTL_DAYS` | 세션별 수집 결과 보존 기간, 기본 7일 (0 이면 보관) |
 
 실제 키가 포함된 `.env` 파일은 `.gitignore`를 통해 커밋되지 않습니다.
+
+> **YouTube API 키는 사용자가 화면에서 직접 입력합니다.** 사이드바에 넣은 키는 해당 세션의
+> 서버 메모리에만 머물고 디스크·로그·수집 결과 파일 어디에도 기록되지 않습니다. 수집 결과도
+> 세션 단위로 격리되어 다른 접속자에게 보이지 않습니다.
 
 ---
 

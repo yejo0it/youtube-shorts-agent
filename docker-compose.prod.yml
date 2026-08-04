@@ -1,0 +1,27 @@
+services:
+  # 앱 정의는 docker-compose.yml 에 있다. 여기서는 운영 전용 설정만 덧입힌다.
+  shorts-agent:
+    environment:
+      # 잡히지 않은 예외의 원문 메시지·트레이스백을 브라우저에 띄우지 않는다.
+      # 마스킹(app/security.py)은 로그와 우리가 잡은 예외만 덮는다 — 이 경로는
+      # Streamlit 이 직접 렌더하므로 설정으로 막아야 한다. 로컬은 기본값(full) 유지.
+      STREAMLIT_CLIENT_SHOW_ERROR_DETAILS: none
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - shorts-agent
+    restart: always
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
