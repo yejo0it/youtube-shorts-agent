@@ -10,6 +10,7 @@ import sys
 
 import anthropic
 
+from . import security
 from .config import settings
 from .tools import AGENT_TOOLS
 
@@ -55,7 +56,8 @@ def run_agent(user_prompt: str, api_key: str | None = None, model: str | None = 
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # 마스킹 포함 — 이 경로도 googleapiclient 예외(URL 에 키가 실린다)를 로그로 흘린다.
+    security.configure_logging()
     if len(sys.argv) < 2:
         print('사용법: python -m app.agent "<요청>"', file=sys.stderr)
         return 2

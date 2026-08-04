@@ -6,17 +6,19 @@
 from __future__ import annotations
 
 import logging
+from secrets import token_hex
 
 import plotly.graph_objects as go
 import streamlit as st
 
-from . import exports, store, templates, theme
+from . import exports, security, store, templates, theme
 from .config import settings
 from .formatting import compact, plain
 from .schemas import CrawlResult
 from .tools import crawl_channel, read_results
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+# 키가 트레이스백을 타고 로그로 새지 않도록 마스킹까지 함께 설치한다.
+security.configure_logging()
 log = logging.getLogger(__name__)
 
 # 모듈 최상단에서 st.* 를 부르면 안 된다 — rerun/F5 는 이미 import 된 모듈 본문을 건너뛰므로
@@ -48,7 +50,7 @@ def html(macro: str, *args, target=None, **kwargs) -> None:
         markup = templates.render(macro, *args, **kwargs)
     except templates.TemplateRenderError as exc:
         log.exception("템플릿 렌더 실패: %s", macro)
-        container.error(str(exc))
+        container.error(security.mask(exc))
         return
     container.markdown(markup, unsafe_allow_html=True)
 
@@ -110,9 +112,37 @@ def clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
 
 
+def session_namespace() -> str:
+    """세션마다 난수 네임스페이스 하나 — 수집 결과 저장 경로를 가르는 유일한 기준이다.
+
+    사용자가 각자 자기 키로 수집하므로 결과도 세션 밖으로 보이면 안 된다. 세션이 끝나면
+    이 값을 아는 주체가 사라지고, 남은 디렉터리는 `store.purge_expired()` 가 정리한다.
+    """
+    namespace = st.session_state.get("session_ns")
+    if not namespace:
+        namespace = token_hex(8)
+        st.session_state["session_ns"] = namespace
+    return namespace
+
+
+def api_key() -> str:
+    """세션에 담긴 사용자 YouTube 키. 디스크·로그 어디에도 쓰지 않는다."""
+    return (st.session_state.get("yt_api_key") or "").strip()
+
+
+def clear_api_key() -> None:
+    """on_click 콜백 — 위젯 재생성 전이라 입력값을 덮어써도 안전한 유일한 시점."""
+    st.session_state["yt_api_key"] = ""
+
+
 def init_state() -> None:
     """위젯 기본값을 세션에 미리 심어 둔다 (위젯은 key 만 넘겨 값을 읽어간다)."""
+    if "session_ns" not in st.session_state:  # 세션 첫 실행에서만
+        store.purge_expired()
+    namespace = session_namespace()
+
     defaults = {
+        "yt_api_key": "",
         "channel_input": "",
         "max_videos": clamp(settings.default_max_videos, 10, 200),
         "comment_targets": clamp(settings.comment_target_video_count, 1, 50),
@@ -126,7 +156,7 @@ def init_state() -> None:
 
     # 보여줄 게 생기기 전까지만 디스크를 본다. 이후로는 세션이 단일 진실 공급원.
     if st.session_state.get("result") is None:
-        st.session_state["result"] = read_results()
+        st.session_state["result"] = read_results(namespace)
 
 
 def current_result() -> CrawlResult | None:
@@ -155,7 +185,7 @@ def load_saved_channel() -> None:
     if not channel_id:
         return
 
-    result = read_results(channel_id)
+    result = read_results(session_namespace(), channel_id)
     if result is None:
         st.session_state["load_notice"] = "⚠️ 저장된 결과를 읽지 못했습니다."
         return
@@ -168,17 +198,59 @@ def load_saved_channel() -> None:
 # -------------------------------------------------------------------- 사이드바
 
 
+def render_api_key() -> str:
+    """YouTube 키 입력. 값은 이 세션의 서버 메모리에만 머문다 — 저장도 로깅도 하지 않는다."""
+    st.markdown("### 🔑 YouTube API 키")
+    key = st.text_input(
+        "YouTube Data API v3 키",
+        type="password",
+        key="yt_api_key",
+        placeholder="AIza...",
+        label_visibility="collapsed",
+        help="본인 키로 본인 쿼터를 씁니다. 서버에 저장하지 않으므로 다시 접속하면 재입력이 필요합니다.",
+    ).strip()
+
+    if key:
+        left, right = st.columns([3, 2], vertical_alignment="center")
+        left.caption(f"✅ 등록됨 · `{security.fingerprint(key)}`")
+        right.button("지우기", key="clear_key_btn", on_click=clear_api_key, width="stretch")
+    else:
+        st.caption("❌ 키를 입력해야 수집을 시작할 수 있습니다.")
+
+    ip_line = (
+        f"**IP 주소** 제한으로 `{settings.server_public_ip}` 를 추가하세요."
+        if settings.server_public_ip
+        else "**IP 주소** 제한을 쓰고, 허용할 서버 IP 는 운영자에게 확인하세요."
+    )
+    with st.expander("🔒 키 발급과 안전한 사용"):
+        st.markdown(
+            "**발급** — Google Cloud Console → API 및 서비스 → 사용자 인증 정보 → "
+            "API 키 만들기. 같은 프로젝트에서 **YouTube Data API v3** 를 사용 설정해야 합니다.\n\n"
+            "**키 제한 (권장)**\n"
+            "- *API 제한*: YouTube Data API v3 **하나만** 선택하세요. 유출되어도 다른 Google "
+            "서비스로 번지지 않습니다.\n"
+            f"- *애플리케이션 제한*: 이 서버가 대신 호출하므로 HTTP 리퍼러 제한은 **동작하지 "
+            f"않습니다**. {ip_line}\n\n"
+            "**이 사이트의 키 취급**\n"
+            "- 입력한 키는 세션 메모리에만 두고 디스크·로그·수집 결과 파일에 남기지 않습니다.\n"
+            "- 브라우저를 닫거나 **지우기** 를 누르면 서버에서 사라집니다.\n"
+            "- 수집 결과는 이 세션에만 보이며 "
+            f"{settings.session_ttl_days}일 뒤 자동 삭제됩니다.\n\n"
+            "키는 공개 데이터 읽기 전용이며 Google 계정 접근·결제 권한이 없습니다. "
+            "무료 할당량은 하루 10,000 units 입니다."
+        )
+    return key
+
+
 def sidebar() -> None:
     with st.sidebar:
+        yt_key = render_api_key()
+
+        st.divider()
         st.markdown("### ⚙️ 수집 설정")
 
-        yt_ok = bool(settings.youtube_api_key)
         an_ok = bool(settings.anthropic_api_key)
-        st.caption(
-            f"YouTube API {'✅' if yt_ok else '❌'} · Claude API {'✅' if an_ok else '❌'}"
-        )
-        if not yt_ok:
-            st.error("`.env` 에 YOUTUBE_API_KEY 를 설정하세요.")
+        st.caption(f"Claude API {'✅' if an_ok else '❌'}")
 
         channel = st.text_input(
             "채널",
@@ -200,14 +272,20 @@ def sidebar() -> None:
         st.caption(f"예상 쿼터 소모: 약 {estimated} units (일일 한도 10,000)")
 
         if st.button(
-            "🔍 수집 시작", type="primary", width="stretch", disabled=not yt_ok, key="run_crawl_btn"
+            "🔍 수집 시작",
+            type="primary",
+            width="stretch",
+            disabled=not yt_key,
+            key="run_crawl_btn",
         ):
             if not channel.strip():
                 st.warning("채널을 입력하세요.")
             else:
-                run_crawl(channel, max_videos, max_comments, comment_targets, run_analysis)
+                run_crawl(
+                    channel, yt_key, max_videos, max_comments, comment_targets, run_analysis
+                )
 
-        saved = store.list_channels()
+        saved = store.list_channels(session_namespace())
         if saved:
             st.divider()
             st.markdown("### 💾 저장된 채널")
@@ -234,8 +312,35 @@ def sidebar() -> None:
                 st.caption(st.session_state["load_notice"])
 
 
+def crawl_error_message(exc: Exception) -> str:
+    """예외를 사용자용 문구로. 마스킹이 먼저다 — HttpError 문자열에는 키가 실린 URL 이 들어 있다."""
+    text = security.mask(exc)
+    lowered = text.lower()
+    if "api key not valid" in lowered or "api_key_invalid" in lowered:
+        return (
+            "API 키가 유효하지 않습니다. 키 값과 해당 프로젝트의 "
+            "**YouTube Data API v3 사용 설정**을 확인하세요."
+        )
+    if "quota" in lowered:
+        return (
+            "이 키의 일일 쿼터(10,000 units)를 모두 사용했습니다. "
+            "태평양 표준시 자정에 초기화됩니다."
+        )
+    if "blocked" in lowered or "referer" in lowered:
+        return (
+            "키의 애플리케이션 제한이 이 서버를 막고 있습니다. "
+            "리퍼러 제한 대신 **IP 주소 제한**으로 서버 IP 를 허용하세요."
+        )
+    return f"수집 실패: {text}"
+
+
 def run_crawl(
-    channel: str, max_videos: int, max_comments: int, comment_targets: int, analyze: bool
+    channel: str,
+    yt_key: str,
+    max_videos: int,
+    max_comments: int,
+    comment_targets: int,
+    analyze: bool,
 ) -> None:
     bar = st.sidebar.progress(0.0, text="시작하는 중…")
 
@@ -245,6 +350,8 @@ def run_crawl(
     try:
         result = crawl_channel(
             channel,
+            yt_key,
+            session_namespace(),
             max_videos=max_videos,
             max_comments_per_video=max_comments,
             comment_target_video_count=comment_targets,
@@ -253,7 +360,7 @@ def run_crawl(
         )
     except Exception as exc:  # noqa: BLE001 - 사용자에게 그대로 노출
         bar.empty()
-        st.sidebar.error(f"수집 실패: {exc}")
+        st.sidebar.error(crawl_error_message(exc))
         return
 
     bar.empty()
@@ -600,7 +707,13 @@ def main() -> None:
     result: CrawlResult | None = current_result()
     if result is None:
         html("hero")
-        st.info("왼쪽 사이드바에서 채널을 입력하고 **수집 시작**을 누르세요.")
+        if api_key():
+            st.info("왼쪽 사이드바에서 채널을 입력하고 **수집 시작**을 누르세요.")
+        else:
+            st.info(
+                "왼쪽 사이드바에 본인의 **YouTube Data API v3 키**를 입력한 뒤 채널을 넣고 "
+                "**수집 시작**을 누르세요. 키는 서버에 저장되지 않습니다."
+            )
         return
 
     render_header(result)
