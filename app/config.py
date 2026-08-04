@@ -25,8 +25,13 @@ def _int_env(name: str, default: int) -> int:
 class Settings:
     """앱 전역 설정. 모든 값은 .env 로 덮어쓸 수 있습니다."""
 
+    # ⚠️ CLI 에이전트(`python -m app.agent`) 전용. 대시보드는 이 값을 절대 읽지 않는다 —
+    #    웹에서는 사용자가 자기 키를 넣고, 서버 키로 조용히 폴백하면 방문자가 운영자 쿼터를 쓴다.
     youtube_api_key: str = field(default_factory=lambda: os.getenv("YOUTUBE_API_KEY", ""))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+
+    # 키 제한 안내에 띄울 서버 고정 IP. 서버가 대신 호출하므로 리퍼러 제한은 동작하지 않는다.
+    server_public_ip: str = field(default_factory=lambda: os.getenv("SERVER_PUBLIC_IP", ""))
 
     # Claude 모델 — 분석과 에이전트 루프에 사용
     model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-opus-5"))
@@ -50,6 +55,9 @@ class Settings:
     data_dir: Path = field(
         default_factory=lambda: Path(os.getenv("DATA_DIR", "/data")).expanduser()
     )
+
+    # 세션별 수집 결과 보존 기간. 세션이 끝나면 주인도 다시 못 찾으므로 무한 보관은 무의미하다.
+    session_ttl_days: int = field(default_factory=lambda: _int_env("SESSION_DATA_TTL_DAYS", 7))
 
     def ensure_data_dir(self) -> Path:
         try:

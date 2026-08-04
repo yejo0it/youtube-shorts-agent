@@ -13,7 +13,7 @@ from typing import Callable
 
 from anthropic import beta_tool
 
-from . import store
+from . import security, store
 from .analyzer import analyze_channel, analyze_comments
 from .config import settings
 from .schemas import CrawlResult
@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 
 ProgressFn = Callable[[str, float], None] | None
 
+# CLI 에이전트 전용 네임스페이스. 대시보드 세션들과 저장 경로를 섞지 않는다.
+AGENT_NAMESPACE = "agent"
+
 
 def _noop(_message: str, _fraction: float) -> None:
     return None
@@ -30,21 +33,25 @@ def _noop(_message: str, _fraction: float) -> None:
 
 def crawl_channel(
     channel: str,
+    api_key: str,
+    namespace: str,
     max_videos: int | None = None,
     max_comments_per_video: int | None = None,
     comment_target_video_count: int | None = None,
     include_analysis: bool = True,
     progress: ProgressFn = None,
 ) -> CrawlResult:
-    """쇼츠(60초 이하)와 댓글을 수집해 분석한다. 롱폼은 videos.list 단계에서 제외된다."""
+    """쇼츠(60초 이하)와 댓글을 수집해 분석한다. 롱폼은 videos.list 단계에서 제외된다.
+
+    api_key 는 호출자가 반드시 넘긴다 — 대시보드는 세션에 담긴 사용자 키를,
+    CLI 에이전트는 환경변수를 쓴다. 여기서 설정으로 폴백하면 그 구분이 무너진다.
+    """
     report = progress or _noop
     max_videos = max_videos or settings.default_max_videos
     max_comments_per_video = max_comments_per_video or settings.default_max_comments_per_video
     comment_targets = comment_target_video_count or settings.comment_target_video_count
 
-    client = YouTubeClient(
-        settings.youtube_api_key, shorts_max_duration_sec=settings.shorts_max_duration_sec
-    )
+    client = YouTubeClient(api_key, shorts_max_duration_sec=settings.shorts_max_duration_sec)
 
     # 1) 채널 프로필 + uploads 재생목록
     report("채널 정보를 불러오는 중…", 0.05)
@@ -89,7 +96,9 @@ def crawl_channel(
             result.analysis = analyze_comments(profile.title, shorts, threads)
         except Exception as exc:  # noqa: BLE001 - 분석 실패해도 수집 결과는 살린다
             log.exception("댓글 분석 실패")
-            result.analysis_error = str(exc)
+            # 이 문자열은 디스크에 저장되고, 화면에 표시되고, 모델에게도 전달된다 —
+            # 세 경로 모두 되돌릴 수 없으므로 저장 시점에 마스킹한다.
+            result.analysis_error = security.mask(exc)
 
     # 6) 채널 종합 분석 — 지표만으로도 돌아가므로 5가 실패해도 실행한다.
     if include_analysis and shorts:
@@ -98,16 +107,16 @@ def crawl_channel(
             result.overall = analyze_channel(result)
         except Exception as exc:  # noqa: BLE001 - 종합 분석 실패도 수집 결과를 버리지 않는다
             log.exception("채널 종합 분석 실패")
-            result.overall_error = str(exc)
+            result.overall_error = security.mask(exc)
 
-    store.save(result)
+    store.save(result, namespace)
     report("완료", 1.0)
     return result
 
 
-def read_results(channel_id: str = "") -> CrawlResult | None:
-    """저장된 크롤링 결과를 읽는다. channel_id 가 비어 있으면 최근 결과."""
-    return store.load(channel_id) if channel_id else store.latest()
+def read_results(namespace: str, channel_id: str = "") -> CrawlResult | None:
+    """저장된 크롤링 결과를 읽는다. channel_id 가 비어 있으면 이 세션의 최근 결과."""
+    return store.load(channel_id, namespace) if channel_id else store.latest(namespace)
 
 
 def summarize_for_model(result: CrawlResult, top_n: int = 10) -> dict:
@@ -194,15 +203,26 @@ def youtube_channel_crawler(
     Returns:
         수집 요약과 분석 결과가 담긴 JSON 문자열.
     """
+    # CLI 에이전트에서만 도는 경로라 환경변수 키를 쓴다. 대시보드는 이 도구를 부르지 않는다.
+    if not settings.youtube_api_key:
+        return json.dumps(
+            {"error": "YOUTUBE_API_KEY 환경변수가 설정되지 않았습니다.", "channel": channel},
+            ensure_ascii=False,
+        )
     try:
         result = crawl_channel(
             channel,
+            settings.youtube_api_key,
+            AGENT_NAMESPACE,
             max_videos=max_videos,
             max_comments_per_video=max_comments_per_video,
             include_analysis=include_analysis,
         )
     except Exception as exc:  # noqa: BLE001 - 모델이 읽고 대응할 수 있게 문자열로 반환
-        return json.dumps({"error": str(exc), "channel": channel}, ensure_ascii=False)
+        # 마스킹 필수 — HttpError 문자열에는 키가 실린 요청 URL 이 들어 있다.
+        return json.dumps(
+            {"error": security.mask(exc), "channel": channel}, ensure_ascii=False
+        )
 
     return json.dumps(summarize_for_model(result), ensure_ascii=False, indent=2)
 
@@ -220,12 +240,12 @@ def get_crawling_results(channel_id: str = "") -> str:
     Returns:
         수집 결과 JSON 문자열. 저장된 결과가 없으면 error 필드를 담아 반환한다.
     """
-    result = read_results(channel_id)
+    result = read_results(AGENT_NAMESPACE, channel_id)
     if result is None:
         return json.dumps(
             {
                 "error": "저장된 크롤링 결과가 없습니다. 먼저 youtube_channel_crawler 를 실행하세요.",
-                "available_channels": store.list_channels(),
+                "available_channels": store.list_channels(AGENT_NAMESPACE),
             },
             ensure_ascii=False,
         )
