@@ -1,7 +1,7 @@
 """대시보드 내려받기용 데이터 변환 — 쇼츠 요약+반응(CSV) / 댓글·대댓글 원본(JSON).
 
 CSV 는 '쇼츠 한 편 = 한 행'에 댓글을 접어 넣고, 셀 상한을 넘는 분량은 JSON 이 담당한다.
-프롬프트용 축약본(tools.summarize_for_model)과 달리 수집 전량을 그대로 내보낸다.
+프롬프트용 축약본(collector.summarize_for_model)과 달리 수집 전량을 그대로 내보낸다.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from .schemas import CommentThread, CrawlResult
+from ..domain.models import CommentThread, CrawlResult
 
 _SAFE = re.compile(r"[^A-Za-z0-9_-]")
 

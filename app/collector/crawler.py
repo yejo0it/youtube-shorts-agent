@@ -1,30 +1,26 @@
-"""에이전트 도구 정의.
+"""수집 파이프라인 — 채널 해석부터 LLM 분석·저장까지 한 흐름.
 
-@beta_tool 로 감싼 두 도구(youtube_channel_crawler / get_crawling_results)는 Claude tool
-runner 용이고, 대시보드가 직접 부를 수 있도록 순수 구현(crawl_channel / read_results)도 함께 노출한다.
+대시보드와 에이전트 도구가 공유하는 유일한 수집 진입점이다. 도구 래퍼(app/agent/tools.py)와
+분리해 둔 이유는, 대시보드가 도구 스키마를 거치지 않고 이 함수를 직접 부르기 때문이다.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Callable
 
-from anthropic import beta_tool
-
-from . import security, store
-from .analyzer import analyze_channel, analyze_comments
-from .config import settings
-from .schemas import CrawlResult
-from .youtube_client import YouTubeClient
+from ..analysis import analyze_channel, analyze_comments
+from ..core import security
+from ..core.config import settings
+from ..domain.models import CrawlResult
+from ..llm.usage import UsageTotals
+from . import store
+from .youtube import YouTubeClient
 
 log = logging.getLogger(__name__)
 
 ProgressFn = Callable[[str, float], None] | None
-
-# CLI 에이전트 전용 네임스페이스. 대시보드 세션들과 저장 경로를 섞지 않는다.
-AGENT_NAMESPACE = "agent"
 
 
 def _noop(_message: str, _fraction: float) -> None:
@@ -89,11 +85,14 @@ def crawl_channel(
         longform_excluded=excluded,
     )
 
+    totals = UsageTotals()
+
     # 5) LLM 반응 분석 — 댓글이 있을 때만
     if include_analysis and threads:
         report("Claude 가 시청자 반응을 분석하는 중…", 0.8)
         try:
-            result.analysis = analyze_comments(profile.title, shorts, threads)
+            result.analysis, usage = analyze_comments(profile.title, shorts, threads)
+            totals.add(usage)
         except Exception as exc:  # noqa: BLE001 - 분석 실패해도 수집 결과는 살린다
             log.exception("댓글 분석 실패")
             # 이 문자열은 디스크에 저장되고, 화면에 표시되고, 모델에게도 전달된다 —
@@ -104,10 +103,14 @@ def crawl_channel(
     if include_analysis and shorts:
         report("Claude 가 채널 전반을 종합 분석하는 중…", 0.9)
         try:
-            result.overall = analyze_channel(result)
+            result.overall, usage = analyze_channel(result)
+            totals.add(usage)
         except Exception as exc:  # noqa: BLE001 - 종합 분석 실패도 수집 결과를 버리지 않는다
             log.exception("채널 종합 분석 실패")
             result.overall_error = security.mask(exc)
+
+    if totals.calls:
+        log.info("수집 분석 비용 — %s", totals.summary())
 
     store.save(result, namespace)
     report("완료", 1.0)
@@ -176,80 +179,3 @@ def summarize_for_model(result: CrawlResult, top_n: int = 10) -> dict:
         "channel_overall_analysis": overall.model_dump() if overall else None,
         "channel_overall_analysis_error": result.overall_error or None,
     }
-
-
-# --------------------------------------------------------------- 에이전트 도구
-
-
-@beta_tool
-def youtube_channel_crawler(
-    channel: str,
-    max_videos: int = 60,
-    max_comments_per_video: int = 50,
-    include_analysis: bool = True,
-) -> str:
-    """유튜브 채널의 쇼츠(60초 이하)와 댓글/대댓글을 수집하고 시청자 반응을 분석한다.
-
-    롱폼(60초 초과) 영상은 분석 대상에서 완전히 제외되어 API 쿼터를 절약한다.
-    수집 결과는 저장되므로 이후 get_crawling_results 로 다시 읽을 수 있다.
-
-    Args:
-        channel: 채널 ID(UC...), @핸들, 또는 채널 URL.
-        max_videos: 쇼츠 판별을 위해 훑어볼 최근 업로드 개수. 기본 60.
-        max_comments_per_video: 영상 한 편당 수집할 최상위 댓글 수. 기본 50.
-        include_analysis: True 면 수집 직후 댓글 감정/키워드 분석과
-            채널 전반 종합 분석(성과 요약·성공 요인·반응 트렌드·콘텐츠 전략)까지 수행한다.
-
-    Returns:
-        수집 요약과 분석 결과가 담긴 JSON 문자열.
-    """
-    # CLI 에이전트에서만 도는 경로라 환경변수 키를 쓴다. 대시보드는 이 도구를 부르지 않는다.
-    if not settings.youtube_api_key:
-        return json.dumps(
-            {"error": "YOUTUBE_API_KEY 환경변수가 설정되지 않았습니다.", "channel": channel},
-            ensure_ascii=False,
-        )
-    try:
-        result = crawl_channel(
-            channel,
-            settings.youtube_api_key,
-            AGENT_NAMESPACE,
-            max_videos=max_videos,
-            max_comments_per_video=max_comments_per_video,
-            include_analysis=include_analysis,
-        )
-    except Exception as exc:  # noqa: BLE001 - 모델이 읽고 대응할 수 있게 문자열로 반환
-        # 마스킹 필수 — HttpError 문자열에는 키가 실린 요청 URL 이 들어 있다.
-        return json.dumps(
-            {"error": security.mask(exc), "channel": channel}, ensure_ascii=False
-        )
-
-    return json.dumps(summarize_for_model(result), ensure_ascii=False, indent=2)
-
-
-@beta_tool
-def get_crawling_results(channel_id: str = "") -> str:
-    """이미 수집한 쇼츠 채널 데이터를 구조화된 JSON 으로 반환한다.
-
-    채널 메타데이터, 쇼츠 성과 순위, 시청자 댓글/대댓글 분석,
-    그리고 채널 전반 종합 분석(channel_overall_analysis)을 포함한다.
-
-    Args:
-        channel_id: 조회할 채널 ID. 비워두면 가장 최근에 수집한 채널을 반환한다.
-
-    Returns:
-        수집 결과 JSON 문자열. 저장된 결과가 없으면 error 필드를 담아 반환한다.
-    """
-    result = read_results(AGENT_NAMESPACE, channel_id)
-    if result is None:
-        return json.dumps(
-            {
-                "error": "저장된 크롤링 결과가 없습니다. 먼저 youtube_channel_crawler 를 실행하세요.",
-                "available_channels": store.list_channels(AGENT_NAMESPACE),
-            },
-            ensure_ascii=False,
-        )
-    return json.dumps(summarize_for_model(result, top_n=20), ensure_ascii=False, indent=2)
-
-
-AGENT_TOOLS = [youtube_channel_crawler, get_crawling_results]

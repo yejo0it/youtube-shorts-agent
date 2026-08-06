@@ -258,53 +258,97 @@ http://localhost:8501
 
 ## 7. 프로젝트 구조
 
+기능별 패키지로 나뉘어 있고, **의존 방향은 항상 아래로만** 흐릅니다
+(`core` 는 아무것도 임포트하지 않고, `dashboard`/`agent` 는 아무도 임포트하지 않습니다).
+
+```
+app/
+├── core/         설정(config) · 마스킹과 로깅(security)
+├── domain/       수집 모델(models) · LLM 출력 스키마(analysis)
+├── llm/          LiteLLM 단일 관문(gateway) · 재시도(retry) · 단가(pricing) · 사용량(usage)
+├── collector/    YouTube 클라이언트(youtube) · 수집 파이프라인(crawler) · 저장소(store)
+├── analysis/     프롬프트(prompts) · 페이로드(payloads) · 댓글(comments) · 채널 종합(channel)
+├── agent/        도구 정의(tools) · 루프 가드(loop) · CLI(cli)
+└── dashboard/    진입점(app) · 세션 상태(state) · 사이드바 · 섹션 · 차트 · 위젯 · 템플릿/테마
+```
+
 ```mermaid
 graph TD
-    APP["Application"]
+    ENTRY["streamlit_app.py / python -m app.agent"]
 
-    DASH["dashboard.py<br/>Streamlit UI"]
-    AGENT["agent.py<br/>AI Agent"]
-    TOOLS["tools.py<br/>Agent Tools"]
+    DASH["dashboard/<br/>Streamlit UI"]
+    AGENT["agent/<br/>루프 가드 + 도구"]
+    COLLECT["collector/<br/>수집 · 저장"]
+    ANALYSIS["analysis/<br/>LLM 분석 2단계"]
+    LLM["llm/<br/>LiteLLM 관문 · 재시도 · 비용"]
+    DOMAIN["domain/<br/>모델 · 스키마"]
+    CORE["core/<br/>설정 · 마스킹"]
 
-    TEMPLATES["templates.py<br/>렌더링 계층"]
-    HTML["web/index.html<br/>HTML 매크로"]
-    CSS["web/styles.css<br/>스타일"]
-    THEME["theme.py<br/>색상 토큰"]
+    ENTRY --> DASH
+    ENTRY --> AGENT
 
-    YOUTUBE["youtube_client.py<br/>YouTube API"]
-    ANALYZER["analyzer.py<br/>LLM 분석"]
-    STORE["store.py<br/>데이터 저장"]
-    EXPORTS["exports.py<br/>CSV/JSON 내보내기"]
+    AGENT --> COLLECT
+    DASH --> COLLECT
+    COLLECT --> ANALYSIS
+    ANALYSIS --> LLM
+    AGENT --> LLM
 
-    APP --> DASH
-    APP --> AGENT
-
-    AGENT --> TOOLS
-    DASH --> TOOLS
-    DASH --> EXPORTS
-    DASH --> TEMPLATES
-
-    TEMPLATES --> HTML
-    TEMPLATES --> CSS
-    THEME --> TEMPLATES
-
-    TOOLS --> YOUTUBE
-    TOOLS --> ANALYZER
-    TOOLS --> STORE
+    DASH --> DOMAIN
+    COLLECT --> DOMAIN
+    LLM --> CORE
+    COLLECT --> CORE
 ```
+
+### LLM 호출 계층
+
+모든 LLM 호출은 **LiteLLM 을 경유**하며, 그 통로는 `app/llm/gateway.py` 하나뿐입니다.
+`litellm` 을 직접 임포트하는 파일은 gateway 와 retry 둘뿐이라, 재시도·토큰 집계·비용
+로깅·키 마스킹이 새 호출부에서 빠질 수 없습니다.
+
+| 관심사 | 위치 | 동작 |
+|---|---|---|
+| 라우팅 | `gateway.resolve_model()` | 모델명에 `/` 가 없으면 `anthropic/` 접두사를 붙임 (`LLM_PROVIDER`) |
+| 재시도 | `llm/retry.py` | 429·타임아웃·연결 오류·5xx 만 지수 백오프로 재시도. `retry-after` 헤더가 오면 그 값을 우선. **폴백 체인 없음** |
+| 비재시도 | `llm/retry.py` | 인증·권한·잘못된 요청은 즉시 중단 (같은 요청은 다시 보내도 같은 실패) |
+| 토큰·비용 | `llm/usage.py` · `llm/pricing.py` | 호출 1건 = JSON 로그 한 줄. 단가표에 없는 모델은 `cost_usd: null` (0 이 아님) |
+| 구조화 출력 | `gateway.complete_structured()` | Pydantic 스키마로 검증. 본문이 비면 도구 호출 인자에서 회수 |
+
+```
+INFO app.llm.usage: {"event":"llm_call","label":"analysis.comments","status":"ok",
+                     "model":"claude-opus-5","input_tokens":8412,"output_tokens":1930,
+                     "total_tokens":10342,"cost_usd":0.09031,"latency_ms":18422,"attempts":1}
+```
+
+관련 환경변수: `LLM_MAX_RETRIES`(기본 4) · `LLM_RETRY_BASE_DELAY`(1.0초) ·
+`LLM_RETRY_MAX_DELAY`(30초) · `LLM_MAX_TOKENS` · `LLM_TIMEOUT_SEC`.
+
+### 에이전트 루프 가드
+
+`app/agent/loop.py` 는 도구 호출 왕복을 `AGENT_MAX_ITERATIONS`(기본 **5**)회로 제한합니다.
+
+- **상한 도달 시** 빈손으로 끝내지 않고 도구를 뗀 채 한 번 더 호출해, 그때까지 모은 것으로
+  최종 답변을 만들게 합니다 (`status="max_iterations"`).
+- **도구가 실패해도 예외를 올리지 않습니다.** 모르는 도구 이름, 깨진 JSON 인자, 잘못된 인자
+  이름, 도구 내부 예외 — 전부 `{"error": ...}` 로 모델에게 되돌려, 모델이 인자를 고쳐
+  재시도하거나 다른 도구를 고르게 합니다.
+- **LLM 호출 자체의 실패는 흡수하지 않습니다** — 모델이 고칠 수 있는 문제가 아니므로
+  `status="error"` 로 즉시 끝냅니다.
+
+`run_agent()` 는 예외 대신 `AgentResult`(답변·상태·반복 횟수·도구 호출 수·누적 사용량·전체
+대화)를 돌려주므로, 중단된 실행에서도 히스토리와 비용이 그대로 남습니다.
 
 ### 마크업 분리 규칙
 
 파이썬 코드에는 HTML·CSS 문자열을 두지 않습니다.
 
 ```
-web/index.html   태그와 클래스 (Jinja2 매크로)
-web/styles.css   색·여백·레이아웃 (var(--토큰) 참조만)
-app/theme.py     색상 토큰의 단일 진실 공급원
-app/templates.py 위 셋을 묶어 데이터만 바인딩
+web/index.html             태그와 클래스 (Jinja2 매크로)
+web/styles.css             색·여백·레이아웃 (var(--토큰) 참조만)
+app/dashboard/theme.py     색상 토큰의 단일 진실 공급원
+app/dashboard/templates.py 위 셋을 묶어 데이터만 바인딩
 ```
 
-- `dashboard.py` 는 `templates.render("매크로명", 데이터)` 로 조각을 받아 출력합니다.
+- `dashboard/sections.py` 는 `widgets.html("매크로명", 데이터)` 로 조각을 받아 출력합니다.
 - `styles.css` 는 색을 리터럴로 갖지 않고 `var(--surface)` 처럼 참조만 합니다.
   실제 값은 `theme.py` 토큰에서 만들어 `:root` 로 주입되므로(`templates.stylesheet()`),
   팔레트를 바꿀 때 CSS 파일은 건드릴 필요가 없고 파이썬 f-string 중괄호 이스케이프 문제도 없습니다.

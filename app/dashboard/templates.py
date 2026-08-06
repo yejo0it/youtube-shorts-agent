@@ -16,7 +16,7 @@ from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoesca
 from . import theme
 from .formatting import compact, mmss, plain
 
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 TEMPLATE = "index.html"
 STYLESHEET = "styles.css"
 
