@@ -18,7 +18,7 @@ from typing import Any, Iterable
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from .schemas import (
+from ..domain.models import (
     ChannelProfile,
     CommentReply,
     CommentThread,

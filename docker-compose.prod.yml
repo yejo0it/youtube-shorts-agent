@@ -3,7 +3,7 @@ services:
   shorts-agent:
     environment:
       # 잡히지 않은 예외의 원문 메시지·트레이스백을 브라우저에 띄우지 않는다.
-      # 마스킹(app/security.py)은 로그와 우리가 잡은 예외만 덮는다 — 이 경로는
+      # 마스킹(app/core/security.py)은 로그와 우리가 잡은 예외만 덮는다 — 이 경로는
       # Streamlit 이 직접 렌더하므로 설정으로 막아야 한다. 로컬은 기본값(full) 유지.
       STREAMLIT_CLIENT_SHOW_ERROR_DETAILS: none
 

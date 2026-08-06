@@ -289,14 +289,72 @@ LLM이 요약한 쇼츠 시청자 주요 반응 키워드 및 피드백 리포�
 | `showErrorDetails` 를 config.toml 이 아니라 **prod 오버레이**에 | 로컬에서 트레이스백이 사라지면 개발이 느려진다. 노출이 문제되는 곳은 공개 서버뿐이므로 4단계에서 만든 경계를 그대로 쓴다 |
 | `ports: []` 로 8501 을 닫지 **않음** | compose 는 `ports` 같은 시퀀스를 오버레이에서 **이어 붙이므로**(대체가 아님) 빈 리스트로 지울 수 없다. 이 경로는 EC2 보안 그룹에서 막아야 한다 |
 
+### P8 — [6단계] 구조화 · LLM 신뢰성 · 루프 가드 (2026-08-06)
+
+원문:
+
+>**[6단계] 에이전트 신뢰성 강화 및 프로젝트 구조화**
+>
+>기존 유튜브 쇼츠 크롤링 에이전트의 코드 구조를 모듈화하여 정돈하고, LLM 호출 신뢰성, 루프 가드 작업을 진행하세요.
+>
+>1. **프로젝트 디렉터리 구조화 (Refactoring)** — 기존 `app/` 디렉터리 하위에 펼쳐져 있던 파일들을 기능별 패키지 모듈로 분리하여 재구성하세요.
+>2. **LLM 호출 신뢰성 & 토큰/비용 로깅** — 모든 LLM 호출은 LiteLLM 을 경유하도록 구현하세요. Claude API 키를 기본 사용하며, API 일시적 오류 및 Rate Limit 발생 시 지수 백오프(Exponential Backoff) 기반 자동 재시도를 적용하세요. (단, 폴백 체인은 구성하지 않음)
+>3. **에이전트 루프 가드 (Loop Guard)** — 도구 호출 최대 반복 횟수를 제한하세요 (예: `max_iterations = 5`). 도구 실행 실패 시 예외를 던지지 않고 에러 내용을 LLM 에게 피드백으로 반환하여, 모델이 다른 인자나 대체 도구로 재시도할 수 있도록 처리하세요.
+
+패키지 경계는 **의존 방향이 한쪽으로만 흐르도록** 잘랐습니다 —
+`core → domain → llm → collector → analysis → agent / dashboard`.
+
+주요 설계 판단 — 1) 구조화:
+
+| 판단 | 이유 |
+|---|---|
+| 파일 이름이 아니라 **의존 방향**으로 자름 | "기능별"을 이름으로만 나누면 순환 임포트가 남는다. `core` 는 아무도 임포트하지 않고 `dashboard`/`agent` 는 아무도 임포트하지 않는다는 규칙이 경계를 유지시킨다 |
+| `schemas.py` 를 `domain/models.py` + `domain/analysis.py` 로 분리 | 한쪽은 YouTube 에서 받는 데이터, 다른 쪽은 **모델에게 주는 지시문**(R3·R8)이다. 수명도 리뷰 대상도 다르다 |
+| `analyzer.py` 를 prompts / payloads / comments / channel 로 | 프롬프트 전문과 집계 로직과 호출부가 한 파일에 있으면, 프롬프트를 고칠 때 diff 가 코드에 묻힌다 |
+| `tools.py` 의 수집 구현을 `collector/crawler.py` 로 이동 | 대시보드는 도구 스키마를 거치지 않고 수집만 부른다. 도구 래퍼와 파이프라인을 한 파일에 두면 UI 가 에이전트 계층에 의존하게 된다 |
+| `dashboard.py`(734줄)를 state/sidebar/sections/charts/widgets 로 | 렌더 순서(app.py)와 섹션 구현을 갈라 두면, 화면 하나를 고칠 때 읽을 파일이 하나로 좁혀진다 |
+| 이동은 전부 `git mv` | 파일 이력이 끊기면 "이 줄이 왜 이렇게 됐나"를 P1~P7 로 되짚을 수 없다 |
+
+주요 설계 판단 — 2) LLM 신뢰성:
+
+| 판단 | 이유 |
+|---|---|
+| `litellm` 임포트를 **gateway·retry 두 파일로 제한** | 호출부가 늘어나도 재시도·토큰 집계·비용 로깅·마스킹 중 하나가 빠질 수 없다. "모든 호출이 LiteLLM 을 경유"는 규칙이 아니라 **구조**여야 강제된다 |
+| `num_retries=0` 으로 LiteLLM 내부 재시도를 끔 | 우리 백오프와 겹치면 실제 대기가 곱해지고, 로그의 `attempts` 가 실제 호출 수와 어긋난다 |
+| 재시도 대상을 **화이트리스트**로 (429·타임아웃·연결·5xx) | 정체 모를 예외까지 재시도하면 우리 쪽 버그가 조용히 5배 요금이 된다. 인증·잘못된 요청은 같은 요청을 다시 보내도 같은 실패다 |
+| `retry-after` 헤더가 계산된 백오프를 **덮어씀** | 서버는 실제 해제 시각을 알고 우리는 모른다. 헤더를 무시하면 한도가 풀리기 전에 다시 두드려 한도를 더 밀어낸다 |
+| 지연에 25% 흔들림 | 여러 호출이 같은 초에 몰려 재시도하는 것을 흩는다. 비율을 25% 로 묶어 두어 지연은 **여전히 단조 증가**한다 |
+| 폴백 체인 없음 (요구사항) | 모델을 바꿔 재시도하면 같은 요청이 서로 다른 모델의 답으로 섞여, 리포트에 남은 숫자가 어느 모델 것인지 사후에 알 수 없다 |
+| 단가표를 **직접 들고** LiteLLM 것을 쓰지 않음 | LiteLLM 은 모르는 모델에 비용 0 을 돌려주기도 한다. 리포트에 남는 숫자이므로 **모르면 0 이 아니라 `null`** 이어야 한다 |
+| 사용량 로그를 **JSON 한 줄**로, 실패한 호출도 기록 | 그대로 `jq` 로 집계된다. 실패는 비용이 0이어도 원인과 시도 횟수가 남아야 한다 |
+| 로그 페이로드에 `security.mask()` 를 **한 번 더** | 예외 문자열에 키가 실려 오는 경로가 있고, 이 줄은 파일로 남아 되돌릴 수 없다 (P7-1 과 같은 판단) |
+| 구조화 출력은 본문 → **도구 호출 인자** 순으로 회수 | LiteLLM 은 공급자에 따라 `response_format` 을 도구 호출로 번역한다. 본문만 보면 그 경로에서 빈손이 된다 |
+
+주요 설계 판단 — 3) 루프 가드:
+
+| 판단 | 이유 |
+|---|---|
+| 상한 도달 시 **도구를 떼고 한 번 더** 호출 | 그냥 끊으면 사용자는 빈손이다. 도구가 없으면 모델은 반드시 텍스트로 답하므로, 그때까지 모은 것으로 결론을 만들게 한다 (R4-1) |
+| 도구 실패를 `dispatch()` 한 곳에서 흡수 | 도구마다 try/except 를 두면 새 도구에서 빠진다. **어떤 구현이 무엇을 던지든** 모델에게는 오류 페이로드로만 도착한다 |
+| `TypeError` 를 잡아 파이썬 메시지를 그대로 전달 | "unexpected keyword argument 'foo'" 는 이미 모델이 읽고 고칠 수 있는 최선의 피드백이다. 따로 검증기를 쓸 이유가 없다 |
+| **LLM 호출 실패는 흡수하지 않음** | 키 누락·재시도 소진은 모델이 인자를 바꿔 고칠 수 있는 문제가 아니다. 피드백으로 되돌리면 상한까지 헛돈다 → `status="error"` 로 즉시 종료 |
+| 예외 대신 `AgentResult` 반환 | 중단된 실행에서도 대화 히스토리·누적 토큰·비용이 남는다. 실패한 실행일수록 그 기록이 필요하다 |
+| 도구 호출 왕복을 세고 **도구 호출 건수는 따로** 기록 | 한 턴이 도구를 여러 개 부르므로 두 수가 다르다. 상한은 왕복 기준이고, 비용 감각은 건수 쪽에 있다 |
+| 시스템 프롬프트에 "error 를 읽고 고쳐 재시도" 지시 추가 | 가드는 실패를 **되돌려 줄** 뿐이다. 읽고 고치라고 말하지 않으면 같은 인자로 상한까지 반복한다 |
+
+> ⚠️ **`ANTHROPIC_API_KEY` 범위는 그대로입니다** — LiteLLM 을 거쳐도 Claude 키는 여전히 서버
+> `.env` 값이라, 공개 도메인에서는 방문자 누구나 운영자 크레딧을 소모시킬 수 있습니다(P7-1 참조).
+> 다만 이제 소모량이 `app.llm.usage` 로그에 호출 단위로 남아 **사후 추적은 가능**합니다.
+
 ---
 
 ## 2. 런타임 프롬프트 🤖
 
 ### R1 — 댓글 반응 분석 시스템 프롬프트
 
-**위치:** [app/analyzer.py](app/analyzer.py) `SYSTEM_PROMPT` · **호출:** `client.messages.parse(...)` (structured outputs)
-**모델:** `CLAUDE_MODEL` (기본 `claude-opus-5`) · **max_tokens:** 16000
+**위치:** [app/analysis/prompts.py](app/analysis/prompts.py) `COMMENT_SYSTEM_PROMPT` ·
+**호출:** [app/analysis/comments.py](app/analysis/comments.py) → `gateway.complete_structured(...)` (LiteLLM 경유 구조화 출력)
+**모델:** `LLM_PROVIDER/CLAUDE_MODEL` (기본 `anthropic/claude-opus-5`) · **max_tokens:** `LLM_MAX_TOKENS` (기본 16000)
 
 ```text
 당신은 유튜브 쇼츠 채널의 시청자 반응을 분석하는 콘텐츠 전략 애널리스트입니다.
@@ -330,7 +388,8 @@ LLM이 요약한 쇼츠 시청자 주요 반응 키워드 및 피드백 리포�
 
 ### R2 — 분석 사용자 메시지 & 페이로드 구조
 
-**위치:** [app/analyzer.py](app/analyzer.py) `analyze_comments` / `build_analysis_payload`
+**위치:** [app/analysis/prompts.py](app/analysis/prompts.py) `COMMENT_INSTRUCTION` /
+[app/analysis/payloads.py](app/analysis/payloads.py) `build_analysis_payload`
 
 ```text
 다음은 한 쇼츠 채널에서 수집한 영상별 댓글과 대댓글입니다.
@@ -350,7 +409,7 @@ LLM이 요약한 쇼츠 시청자 주요 반응 키워드 및 피드백 리포�
   └ 대댓글(좋아요 {n}): {본문}
 ```
 
-컨텍스트·비용 보호 상한 (`analyzer.py` 상수):
+컨텍스트·비용 보호 상한 (`payloads.py` 상수):
 
 | 상수 | 값 | 의도 |
 |---|---|---|
@@ -362,9 +421,9 @@ LLM이 요약한 쇼츠 시청자 주요 반응 키워드 및 피드백 리포�
 
 ### R3 — 구조화 출력 스키마 (스키마도 프롬프트다)
 
-**위치:** [app/schemas.py](app/schemas.py) `CommentAnalysis` 및 하위 모델
+**위치:** [app/domain/analysis.py](app/domain/analysis.py) `CommentAnalysis` 및 하위 모델
 
-`output_format=CommentAnalysis` 로 넘기므로 각 필드의 `Field(description=...)` 이 모델에게는
+`response_format=CommentAnalysis` 로 넘기므로 각 필드의 `Field(description=...)` 이 모델에게는
 **필드별 지시문**으로 작동합니다. 출력 형태를 바꾸려면 시스템 프롬프트가 아니라 여기를 고치세요.
 
 | 필드 | description (= 지시문) |
@@ -380,12 +439,13 @@ LLM이 요약한 쇼츠 시청자 주요 반응 키워드 및 피드백 리포�
 | `content_recommendations` | 다음 쇼츠 기획을 위한 실행 가능한 제안 |
 | `per_video[]` | 영상별 반응 2-3문장 요약 + 지배 감정 |
 
-거부(`stop_reason == "refusal"`)와 파싱 실패는 예외로 올려 `analysis_error` 에 남기고,
+거부(`content_filter`)와 파싱 실패는 `LLMSchemaError` 로 올려 `analysis_error` 에 남기고,
 수집 데이터 자체는 그대로 보존합니다.
 
-### R4 — 에이전트 시스템 프롬프트 (tool runner)
+### R4 — 에이전트 시스템 프롬프트
 
-**위치:** [app/agent.py](app/agent.py) `SYSTEM_PROMPT` · **호출:** `client.beta.messages.tool_runner(...)`
+**위치:** [app/agent/prompts.py](app/agent/prompts.py) `SYSTEM_PROMPT` ·
+**호출:** [app/agent/loop.py](app/agent/loop.py) `run_agent()` — 직접 구현한 루프 (P8)
 
 ```text
 당신은 유튜브 쇼츠 채널 분석 에이전트입니다.
@@ -399,16 +459,36 @@ LLM이 요약한 쇼츠 시청자 주요 반응 키워드 및 피드백 리포�
   같은 채널을 이미 수집했다면 재수집 대신 get_crawling_results 를 쓰세요(쿼터 절약).
 - 롱폼은 분석 대상이 아닙니다. 쇼츠 성과와 시청자 반응에만 집중하세요.
 - 도구가 반환한 수치만 인용하고, 없는 데이터를 추정해서 말하지 마세요.
+- 도구가 error 필드를 돌려주면 그 내용을 읽고 인자를 고쳐 다시 시도하거나 다른 도구를 쓰세요.
+  같은 인자로 같은 도구를 반복 호출하지 마세요.
 - 최종 답변은 한국어로, 결론을 먼저 쓰고 근거를 뒤에 붙이세요.
 ```
 
 의도: **재수집 억제**가 핵심입니다. 크롤링 1회는 수십 units 를 소모하므로,
 저장된 결과가 있으면 읽기 도구로 유도합니다.
+오류 대응 지시(P8)는 루프 가드와 짝입니다 — 도구 실패가 예외 대신 피드백으로 돌아오므로,
+그 피드백을 **읽고 고치라**고 명시해야 같은 인자로 상한까지 헛돌지 않습니다.
 
-### R5 — 도구 설명 (docstring = 도구 프롬프트)
+### R4-1 — 루프 가드 최종 턴 지시 (P8 신규)
 
-**위치:** [app/tools.py](app/tools.py) — `@beta_tool` 이 함수 시그니처와 docstring 을 그대로
-도구 스키마로 변환하므로, **docstring 수정은 프롬프트 수정입니다.**
+**위치:** [app/agent/prompts.py](app/agent/prompts.py) `FINAL_TURN_INSTRUCTION` ·
+**호출:** 반복 상한 도달 시 도구를 떼고 한 번 더 호출할 때 user 메시지로 주입
+
+```text
+도구 호출 한도에 도달했습니다. 더 이상 도구를 쓸 수 없습니다.
+지금까지 도구가 돌려준 내용만으로 최종 답변을 작성하세요.
+확보하지 못한 정보가 있으면 추정하지 말고 무엇이 비었는지 밝히세요.
+```
+
+의도: 상한에 걸렸을 때 **빈손으로 끝내지 않기** 위함입니다. 도구를 뗀 채 한 번 더 부르면
+모델은 반드시 텍스트로 답하고, "추정하지 말고 빈 곳을 밝히라"는 지시가 부족한 근거를
+그럴듯하게 메우는 것을 막습니다.
+
+### R5 — 도구 설명 (description = 도구 프롬프트)
+
+**위치:** [app/agent/tools.py](app/agent/tools.py) `TOOL_SPECS` — LiteLLM 표준(OpenAI 호환)
+함수 스키마의 `description` 이 그대로 모델에게 전달되므로, **description 수정은 프롬프트 수정입니다.**
+(P8 이전에는 `@beta_tool` 이 docstring 을 스키마로 변환했고, 문장은 그대로 옮겼습니다.)
 
 | 도구 | 모델에게 전달되는 핵심 문장 |
 |---|---|
@@ -419,6 +499,10 @@ LLM이 요약한 쇼츠 시청자 주요 반응 키워드 및 피드백 리포�
 스스로 다음 행동을 고를 수 있게 하기 위함입니다. `get_crawling_results` 는 실패 시
 `available_channels` 를 함께 돌려주어 모델이 올바른 `channel_id` 로 재시도하도록 유도합니다.
 
+P8 에서 이 원칙이 `dispatch()` 로 올라가, **도구 구현이 무엇을 던지든** 모델에게는 오류
+페이로드로만 도착합니다 — 모르는 도구 이름은 `available_tools`, 깨진 JSON 인자는 파싱 오류,
+잘못된 인자 이름은 파이썬의 시그니처 오류가 그대로 다음 시도의 단서가 됩니다.
+
 컨텍스트 절약: 도구는 원본이 아니라 `summarize_for_model()` 축약본(상위 쇼츠 + 좋아요 상위 댓글
 15건, 본문 300자 컷)을 반환합니다. 원본 전체는 대시보드 내려받기로만 나갑니다.
 
@@ -428,8 +512,9 @@ P5 에서 축약본에 `channel_overall_analysis`(R8 결과)와 게시 빈도 �
 
 ### R6 — 채널 종합 분석 시스템 프롬프트 (P5 신규)
 
-**위치:** [app/analyzer.py](app/analyzer.py) `OVERALL_SYSTEM_PROMPT` · **호출:** `client.messages.parse(...)`
-**모델:** `CLAUDE_MODEL` (기본 `claude-opus-5`) · **max_tokens:** 16000
+**위치:** [app/analysis/prompts.py](app/analysis/prompts.py) `CHANNEL_SYSTEM_PROMPT` ·
+**호출:** [app/analysis/channel.py](app/analysis/channel.py) → `gateway.complete_structured(...)`
+**모델:** `LLM_PROVIDER/CLAUDE_MODEL` (기본 `anthropic/claude-opus-5`) · **max_tokens:** `LLM_MAX_TOKENS` (기본 16000)
 
 ```text
 당신은 유튜브 쇼츠 채널의 성장 전략을 설계하는 콘텐츠 전략 컨설턴트입니다.
@@ -466,7 +551,8 @@ P5 에서 축약본에 `channel_overall_analysis`(R8 결과)와 게시 빈도 �
 
 ### R7 — 종합 분석 사용자 메시지 & 페이로드 구조 (P5 신규)
 
-**위치:** [app/analyzer.py](app/analyzer.py) `analyze_channel` / `build_channel_payload`
+**위치:** [app/analysis/prompts.py](app/analysis/prompts.py) `CHANNEL_INSTRUCTION` /
+[app/analysis/payloads.py](app/analysis/payloads.py) `build_channel_payload`
 
 ```text
 다음은 한 쇼츠 채널에서 수집한 전체 쇼츠 성과 지표와 시청자 반응입니다.
@@ -502,7 +588,7 @@ P5 에서 축약본에 `channel_overall_analysis`(R8 결과)와 게시 빈도 �
 
 ### R8 — 종합 분석 구조화 출력 스키마 (P5 신규)
 
-**위치:** [app/schemas.py](app/schemas.py) `ChannelOverallAnalysis` 및 하위 모델
+**위치:** [app/domain/analysis.py](app/domain/analysis.py) `ChannelOverallAnalysis` 및 하위 모델
 
 요구사항의 4개 축이 그대로 필드가 됩니다. 중첩 모델을 쓴 이유는 **UI 가 파싱하지 않게** 하기 위함입니다 —
 근거와 우선순위가 분리돼 있어야 카드에서 배지·본문·메타로 나눠 그릴 수 있습니다.
@@ -553,6 +639,15 @@ R1 과 마찬가지로 거부·파싱 실패는 예외로 올려 `overall_error`
 | 2026-08-04 | P7-1 감사 · `security.configure_logging()` | basicConfig+마스킹을 한 함수로 묶고 `agent.py`·`dashboard.py` 양쪽에서 호출 | CLI 진입점에 마스킹이 없어 `python -m app.agent` 트레이스백에 YouTube 키가 원문 노출됨 (실증 확인) |
 | 2026-08-04 | P7-1 감사 · `tools.py` | `analysis_error`/`overall_error` 를 대입 시점에 마스킹 | 이 값은 디스크 저장 + 화면 표시 + 모델 전달 세 경로로 동시에 나가 되돌릴 수 없다 |
 | 2026-08-04 | P7-1 감사 · `docker-compose.prod.yml` | 운영에만 `STREAMLIT_CLIENT_SHOW_ERROR_DETAILS=none` | 기본값 `full` 은 잡히지 않은 예외의 원문·트레이스백을 브라우저에 렌더한다 — 코드 마스킹이 닿지 않는 경로 |
+| 2026-08-06 | P8 개발 프롬프트 | 6단계 — `app/` 평면 배치를 `core`/`domain`/`llm`/`collector`/`analysis`/`agent`/`dashboard` 7개 패키지로 재구성 (전부 `git mv`) | 의존 방향을 한쪽으로 고정해 순환 임포트를 구조적으로 막고, 한 화면·한 관심사를 고칠 때 읽을 파일을 좁힘 |
+| 2026-08-06 | LLM 계층(`llm/gateway.py` 신규) | Anthropic SDK 직접 호출 → **LiteLLM 단일 관문** 경유. `litellm` 임포트를 gateway·retry 두 파일로 제한 | 호출부가 늘어나도 재시도·토큰 집계·비용 로깅·마스킹이 빠질 수 없게 — 규칙이 아니라 구조로 강제 |
+| 2026-08-06 | 재시도(`llm/retry.py` 신규) | 429·타임아웃·연결 오류·5xx 만 지수 백오프(1s→30s, 흔들림 25%)로 재시도, `retry-after` 우선, `num_retries=0` 으로 LiteLLM 내부 재시도 차단 | 폴백 체인 없이 일시적 오류만 흡수. 내부 재시도와 겹치면 대기가 곱해지고 `attempts` 가 실제 호출 수와 어긋난다 |
+| 2026-08-06 | 사용량(`llm/usage.py`·`llm/pricing.py` 신규) | 호출 1건 = JSON 로그 한 줄(성공·실패 모두), 자체 단가표로 비용 산출, 모르는 모델은 `cost_usd: null` | LiteLLM 단가표는 버전에 따라 바뀌고 모르는 모델에 0 을 준다 — 리포트에 남는 숫자는 "모름"이 0보다 정확하다 |
+| 2026-08-06 | R1·R6 호출 방식 | `client.messages.parse(output_format=)` → `gateway.complete_structured(response_format=)`; 프롬프트 전문은 그대로 | 프롬프트를 바꾸지 않고 호출 계층만 교체 — 이번 단계에서 분석 품질이 변하지 않도록 |
+| 2026-08-06 | R4 에이전트 프롬프트 | tool runner → 직접 구현 루프. "error 필드를 읽고 인자를 고쳐 재시도하라" 지시 추가 | 루프 가드가 실패를 되돌려 주기만 하면, 읽고 고치라는 지시가 없을 때 같은 인자로 상한까지 반복한다 |
+| 2026-08-06 | R4-1 최종 턴 지시 (신규) | 반복 상한 도달 시 도구를 떼고 `FINAL_TURN_INSTRUCTION` 으로 한 번 더 호출 | 상한에서 그냥 끊으면 사용자는 빈손이다. 도구가 없으면 모델은 반드시 텍스트로 답한다 |
+| 2026-08-06 | R5 도구 정의 | `@beta_tool` docstring → LiteLLM 표준(OpenAI 호환) `TOOL_SPECS` 의 `description`. 문장은 그대로 이전 | SDK 데코레이터가 사라졌으므로 도구 프롬프트의 위치가 바뀜 — 내용은 동일하게 유지해 모델 행동 변화를 없앰 |
+| 2026-08-06 | 루프 가드(`agent/loop.py` 신규) | 도구 왕복 상한 `AGENT_MAX_ITERATIONS`(기본 5), 도구 실패는 `dispatch()` 가 전부 흡수해 `{"error":...}` 로 피드백, LLM 실패만 `status="error"` 로 종료 | 도구마다 try/except 를 두면 새 도구에서 빠진다. 반대로 LLM 실패는 모델이 고칠 수 없으므로 피드백으로 되돌리면 상한까지 헛돈다 |
 
 ### 프롬프트를 고칠 때
 
