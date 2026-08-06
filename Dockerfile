@@ -12,7 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-# 대시보드 마크업/스타일 — app/templates.py 가 런타임에 읽으므로 빠지면 기동 즉시 실패한다.
+# 대시보드 마크업/스타일 — app/dashboard/templates.py 가 런타임에 읽으므로 빠지면 기동 즉시 실패한다.
 COPY web ./web
 COPY .streamlit ./.streamlit
 COPY streamlit_app.py .

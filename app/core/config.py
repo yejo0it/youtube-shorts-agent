@@ -21,6 +21,16 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """앱 전역 설정. 모든 값은 .env 로 덮어쓸 수 있습니다."""
@@ -33,9 +43,26 @@ class Settings:
     # 키 제한 안내에 띄울 서버 고정 IP. 서버가 대신 호출하므로 리퍼러 제한은 동작하지 않는다.
     server_public_ip: str = field(default_factory=lambda: os.getenv("SERVER_PUBLIC_IP", ""))
 
-    # Claude 모델 — 분석과 에이전트 루프에 사용
+    # ---- LLM (LiteLLM 경유) ---------------------------------------------
+    # LiteLLM 은 "<provider>/<model>" 로 라우팅한다. 모델명에 '/' 가 없으면 이 값이 앞에 붙는다.
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "anthropic"))
     model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-opus-5"))
-    effort: str = field(default_factory=lambda: os.getenv("CLAUDE_EFFORT", "high"))
+    llm_max_tokens: int = field(default_factory=lambda: _int_env("LLM_MAX_TOKENS", 16000))
+    llm_timeout_sec: float = field(default_factory=lambda: _float_env("LLM_TIMEOUT_SEC", 180.0))
+
+    # 지수 백오프 — 재시도 횟수(최초 호출 제외)와 대기 시간의 시작/상한(초).
+    llm_max_retries: int = field(default_factory=lambda: _int_env("LLM_MAX_RETRIES", 4))
+    llm_retry_base_delay: float = field(
+        default_factory=lambda: _float_env("LLM_RETRY_BASE_DELAY", 1.0)
+    )
+    llm_retry_max_delay: float = field(
+        default_factory=lambda: _float_env("LLM_RETRY_MAX_DELAY", 30.0)
+    )
+
+    # 에이전트 루프 가드 — 도구 호출 왕복의 최대 횟수.
+    agent_max_iterations: int = field(
+        default_factory=lambda: _int_env("AGENT_MAX_ITERATIONS", 5)
+    )
 
     # 쇼츠 판별 기준 (초)
     shorts_max_duration_sec: int = field(
@@ -65,7 +92,7 @@ class Settings:
             return self.data_dir
         except OSError:
             # 로컬 실행에서 /data 를 못 쓰면 프로젝트 하위로 폴백
-            fallback = Path(__file__).resolve().parent.parent / ".data"
+            fallback = Path(__file__).resolve().parents[2] / ".data"
             fallback.mkdir(parents=True, exist_ok=True)
             return fallback
 

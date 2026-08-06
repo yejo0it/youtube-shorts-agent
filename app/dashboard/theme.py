@@ -1,6 +1,6 @@
 """차트/UI 색상 토큰의 단일 진실 공급원.
 
-CSS 는 이 값들을 `:root` 변수로 받아 쓴다(app/templates.py). 팔레트 교체는 여기서만.
+CSS 는 이 값들을 `:root` 변수로 받아 쓴다(app/dashboard/templates.py). 팔레트 교체는 여기서만.
 """
 
 from __future__ import annotations

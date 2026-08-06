@@ -13,8 +13,8 @@ import shutil
 import time
 from pathlib import Path
 
-from .config import settings
-from .schemas import CrawlResult
+from ..core.config import settings
+from ..domain.models import CrawlResult
 
 log = logging.getLogger(__name__)
 
